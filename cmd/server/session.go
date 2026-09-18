@@ -214,15 +214,10 @@ func (s *Session) handleEvent(rawEvt any) {
 			_ = s.mgr.store.setJID(s.mgr.appCtx, s.id, id.String())
 		}
 		s.setAuth(AuthSnapshot{State: "open", Paired: true})
-		go s.maintainPresence()
 	case *events.LoggedOut:
 		s.setAuth(AuthSnapshot{State: "logged_out", Paired: false})
 	case *events.CallOffer:
 		s.onIncomingOffer(ctx, evt)
-	case *events.CallOfferNotice:
-		s.log.Info("call offer notice received", "from", evt.From, "media", evt.Media, "type", evt.Type)
-	case *events.UnknownCallEvent:
-		s.log.Info("unknown call event received from WhatsApp", "tag", evt.Node.Tag, "attrs", evt.Node.Attrs)
 	case *events.CallAccept:
 		if ac, ok := s.callForEvent(evt.From, evt.Data); ok {
 			ac.cm.HandleCallAccept(ctx, wrapCall(evt.From, evt.Data), evt.From)
@@ -238,32 +233,6 @@ func (s *Session) handleEvent(rawEvt any) {
 	case *events.CallReject:
 		if ac, ok := s.callForEvent(evt.From, evt.Data); ok {
 			ac.cm.HandleCallTerminate(wrapCall(evt.From, evt.Data), evt.From)
-		}
-	}
-}
-
-func (s *Session) maintainPresence() {
-	if s.client.Store.PushName == "" {
-		s.client.Store.PushName = "WaCalls Agent"
-	}
-	ctx := context.Background()
-	if err := s.client.SendPresence(ctx, types.PresenceAvailable); err != nil {
-		s.log.Warn("failed to send presence available", "err", err)
-	} else {
-		s.log.Info("presence successfully marked AVAILABLE to WhatsApp servers")
-	}
-
-	ticker := time.NewTicker(25 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-s.mgr.appCtx.Done():
-			return
-		case <-ticker.C:
-			if !s.client.IsConnected() {
-				return
-			}
-			_ = s.client.SendPresence(ctx, types.PresenceAvailable)
 		}
 	}
 }
