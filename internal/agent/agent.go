@@ -37,6 +37,7 @@ type AIAgent struct {
 	state      AgentState
 	enabled    atomic.Bool
 	isSpeaking atomic.Bool
+	peerFrames atomic.Int64
 	speechLock sync.Mutex
 
 	// Pre-synthesized greeting audio — populated during ring delay so it plays instantly
@@ -253,11 +254,17 @@ func (a *AIAgent) streamAudioToCall(pcm []float32) {
 
 // FeedPeerAudio feeds incoming WhatsApp audio into VAD with full echo gating
 func (a *AIAgent) FeedPeerAudio(pcm []float32) {
+	a.peerFrames.Add(1)
 	if !a.enabled.Load() || a.isSpeaking.Load() {
 		// Gated while AI is speaking or cooling down
 		return
 	}
 	a.vad.ProcessFrame(pcm)
+}
+
+func (a *AIAgent) HasSpokenWithPeer() bool {
+	// A real conversation has at least 50 incoming audio frames (~1 second of audio)
+	return a.peerFrames.Load() >= 50
 }
 
 func (a *AIAgent) SetEnabled(enabled bool) {

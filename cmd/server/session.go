@@ -132,14 +132,27 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 		s.mgr.broker.upsertCall(rec)
 	}
 	cm.OnEnded = func(c *call.CallInfo) {
-		if ac, ok := s.reg.get(c.CallID); ok && ac.agent != nil {
-			ac.agent.Close()
+		var callbackJID types.JID
+		var hadConversation bool
+		if ac, ok := s.reg.get(c.CallID); ok {
+			callbackJID = ac.callbackJID
+			if ac.agent != nil {
+				hadConversation = ac.agent.HasSpokenWithPeer()
+				ac.agent.Close()
+			}
 		}
 		s.removeCall(c.CallID)
 		s.mgr.broker.endCall(c.CallID, string(c.StateData.EndReason))
-		if c.Direction == core.CallDirectionIncoming && c.StateData.ConnectedAt == nil {
-			if peer, err := types.ParseJID(c.PeerJid); err == nil && !peer.IsEmpty() {
-				s.scheduleAutoCallback(peer, "unanswered_inbound: "+string(c.StateData.EndReason))
+
+		// If inbound call was missed/unanswered, OR dropped/ended quickly (<15s) without any conversation:
+		isShortOrDropped := c.StateData.ConnectedAt == nil || time.Since(*c.StateData.ConnectedAt) < 15*time.Second || !hadConversation
+		if c.Direction == core.CallDirectionIncoming && isShortOrDropped {
+			peer := callbackJID
+			if peer.IsEmpty() {
+				peer, _ = types.ParseJID(c.PeerJid)
+			}
+			if !peer.IsEmpty() {
+				s.scheduleAutoCallback(peer.ToNonAD(), "inbound_missed_or_dropped: "+string(c.StateData.EndReason))
 			}
 		}
 	}
@@ -196,6 +209,17 @@ func (s *Session) onIncomingOffer(ctx context.Context, evt *events.CallOffer) {
 		return
 	}
 	cm := s.createCall(callID)
+	// Prioritize phone number JID (CallCreatorAlt) for direct mobile callback
+	callbackJID := evt.CallCreatorAlt
+	if callbackJID.IsEmpty() {
+		callbackJID = evt.CallCreator
+	}
+	if callbackJID.IsEmpty() {
+		callbackJID = evt.From
+	}
+	if ac, ok := s.reg.get(callID); ok {
+		ac.callbackJID = callbackJID
+	}
 	cm.HandleCallOffer(ctx, node, evt.From)
 
 	if s.mgr.agentConfig != nil && s.mgr.agentConfig.IsAutoAnswer() {
@@ -326,7 +350,7 @@ func (s *Session) scheduleAutoCallback(peer types.JID, reason string) {
 		s.lastCallbacks = make(map[string]time.Time)
 	}
 	last, exists := s.lastCallbacks[peerStr]
-	if exists && time.Since(last) < 60*time.Second {
+	if exists && time.Since(last) < 15*time.Second {
 		s.lastCallbackMu.Unlock()
 		s.log.Debug("auto-callback debounced (called recently)", "peer", peerStr, "reason", reason)
 		return
@@ -336,14 +360,14 @@ func (s *Session) scheduleAutoCallback(peer types.JID, reason string) {
 
 	s.log.Info("scheduling instant AI auto-callback", "peer", peerStr, "reason", reason)
 	go func() {
-		// Wait 2.5s so the caller's phone returns to idle state from the previous attempt
-		time.Sleep(2500 * time.Millisecond)
+		// Wait 2.0s so the caller's phone returns to idle state from the previous attempt
+		time.Sleep(2000 * time.Millisecond)
 
 		// Check if we already have an active call with this peer
 		for _, ac := range s.reg.all() {
 			if ac.cm != nil {
 				c := ac.cm.CurrentCall()
-				if c != nil && !c.IsEnded() && strings.Contains(c.PeerJid, peer.User) {
+				if c != nil && !c.IsEnded() && c.IsActive() && strings.Contains(c.PeerJid, peer.User) {
 					s.log.Info("skipping auto-callback, call already active with peer", "peer", peerStr)
 					return
 				}

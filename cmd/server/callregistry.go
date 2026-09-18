@@ -5,12 +5,15 @@ import (
 
 	"wacalls/internal/agent"
 	"wacalls/internal/voip/call"
+
+	"go.mau.fi/whatsmeow/types"
 )
 
 type activeCall struct {
-	cm     *call.CallManager
-	bridge *Bridge
-	agent  *agent.AIAgent
+	cm          *call.CallManager
+	bridge      *Bridge
+	agent       *agent.AIAgent
+	callbackJID types.JID
 }
 
 type callRegistry struct {
