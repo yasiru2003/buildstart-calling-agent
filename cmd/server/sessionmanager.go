@@ -13,29 +13,31 @@ import (
 )
 
 type SessionManager struct {
-	appCtx    context.Context
-	container *sqlstore.Container
-	broker    *Broker
-	store     *sessionStore
-	waLogger  waLog.Logger
-	log       *slog.Logger
-	maxCalls  int
+	appCtx      context.Context
+	container   *sqlstore.Container
+	broker      *Broker
+	store       *sessionStore
+	waLogger    waLog.Logger
+	log         *slog.Logger
+	maxCalls    int
+	agentConfig *AgentConfig
 
 	mu       sync.RWMutex
 	sessions map[string]*Session
 	order    []string
 }
 
-func newSessionManager(ctx context.Context, container *sqlstore.Container, broker *Broker, store *sessionStore, waLogger waLog.Logger, log *slog.Logger, maxCalls int) *SessionManager {
+func newSessionManager(ctx context.Context, container *sqlstore.Container, broker *Broker, store *sessionStore, waLogger waLog.Logger, log *slog.Logger, maxCalls int, agentCfg *AgentConfig) *SessionManager {
 	return &SessionManager{
-		appCtx:    ctx,
-		container: container,
-		broker:    broker,
-		store:     store,
-		waLogger:  waLogger,
-		log:       log,
-		maxCalls:  maxCalls,
-		sessions:  map[string]*Session{},
+		appCtx:      ctx,
+		container:   container,
+		broker:      broker,
+		store:       store,
+		waLogger:    waLogger,
+		log:         log,
+		maxCalls:    maxCalls,
+		agentConfig: agentCfg,
+		sessions:    map[string]*Session{},
 	}
 }
 
@@ -82,7 +84,11 @@ func (m *SessionManager) infos() []SessionInfo {
 }
 
 func (m *SessionManager) snapshotEvents() []any {
-	return []any{map[string]any{"type": "session-list", "sessions": m.infos()}}
+	events := []any{map[string]any{"type": "session-list", "sessions": m.infos()}}
+	if m.agentConfig != nil {
+		events = append(events, map[string]any{"type": "agent-config", "config": m.agentConfig.Get()})
+	}
+	return events
 }
 
 func (m *SessionManager) Restore(ctx context.Context) error {

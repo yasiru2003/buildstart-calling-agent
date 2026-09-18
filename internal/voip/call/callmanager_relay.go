@@ -8,6 +8,7 @@ import (
 type RelayTransport interface {
 	SetSsrc(ssrc uint32)
 	SetSubscriptionSsrc(ssrc uint32)
+	SetPids(selfPid, peerPid int)
 	SetOnConnected(fn func(ip string, port int))
 	SetOnReceive(fn func(data []byte))
 	ResendSubscriptions()
@@ -23,10 +24,25 @@ var _ RelayTransport = (*transport.SctpRelayManager)(nil)
 func (m *CallManager) onRelayConnected() {
 	m.mu.Lock()
 	call := m.currentCall
-	if call != nil && call.StateData.State == core.CallStateConnecting {
+	// Guard: if the call is already ended, ignore this late-firing OnOpen.
+	if call == nil || call.IsEnded() {
+		m.mu.Unlock()
+		return
+	}
+	// Do NOT start audio yet if the call hasn't been accepted — the relay can connect
+	// during the ring delay (before AcceptCall is called). Sending RTP before the accept
+	// stanza reaches WhatsApp means the peer can't decrypt our packets and drops the call
+	// after ~5 s. AcceptCall itself calls startSilenceKeepaliveLocked when it runs.
+	state := call.StateData.State
+	if state == core.CallStateIncomingRinging || state == core.CallStateInitiating {
+		m.log.Info("relay connected before accept — deferring audio until AcceptCall", "call_id", call.CallID)
+		m.mu.Unlock()
+		return
+	}
+	m.startSilenceKeepaliveLocked()
+	if state == core.CallStateConnecting {
 		if err := call.ApplyTransition(Transition{Type: TransitionMediaConnected}); err == nil {
 			m.emitState()
-			m.startSilenceKeepaliveLocked()
 			m.log.Info("relay connected → active", "call_id", call.CallID)
 		}
 	}
@@ -70,6 +86,17 @@ func (m *CallManager) connectRelays(endpoints []core.RelayEndpoint) {
 	m.mu.Lock()
 	m.relay.SetSsrc(m.selfSsrc)
 	m.relay.SetSubscriptionSsrc(firstSsrc(m.peerSsrcs))
+	if m.currentCall != nil && m.currentCall.RelayData != nil {
+		selfPid := 0
+		peerPid := 0
+		if m.currentCall.RelayData.SelfPid != nil {
+			selfPid = *m.currentCall.RelayData.SelfPid
+		}
+		if m.currentCall.RelayData.PeerPid != nil {
+			peerPid = *m.currentCall.RelayData.PeerPid
+		}
+		m.relay.SetPids(selfPid, peerPid)
+	}
 	m.mu.Unlock()
 	m.relay.ConfigureRelays(relays)
 	m.log.Info("relay configured", "connected", m.relay.ConnectedCount())

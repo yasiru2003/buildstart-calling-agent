@@ -203,6 +203,20 @@ func (b *Broker) emitIncomingClaimed(sessionID, id, owner string) {
 	b.broadcast(map[string]any{"type": "incoming-claimed", "sessionId": sessionID, "id": id, "owner": owner})
 }
 
+func (b *Broker) emitAgentTranscript(sessionID, callID, role, text string, ts int64) {
+	b.broadcast(map[string]any{
+		"type": "agent-transcript", "sessionId": sessionID, "callId": callID,
+		"role": role, "text": text, "timestamp": ts,
+	})
+}
+
+func (b *Broker) emitAgentStatus(sessionID, callID string, enabled bool, state string) {
+	b.broadcast(map[string]any{
+		"type": "agent-status", "sessionId": sessionID, "callId": callID,
+		"enabled": enabled, "state": state,
+	})
+}
+
 func (b *Broker) historyRows(sessionID string, limit int) []CallRecord {
 	b.mu.RLock()
 	defer b.mu.RUnlock()

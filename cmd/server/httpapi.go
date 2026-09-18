@@ -27,6 +27,10 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("DELETE /api/sessions/{sid}/calls/{id}", s.handleEndCall)
 	mux.HandleFunc("GET /api/sessions/{sid}/history", s.handleHistory)
 
+	mux.HandleFunc("GET /api/agent/config", s.handleGetAgentConfig)
+	mux.HandleFunc("POST /api/agent/config", s.handleUpdateAgentConfig)
+	mux.HandleFunc("POST /api/sessions/{sid}/calls/{id}/agent", s.handleToggleCallAgent)
+
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 
 	if s.staticDir != "" {
@@ -279,3 +283,66 @@ func normalizePhone(p string) string {
 	}
 	return b.String()
 }
+
+func (s *server) handleGetAgentConfig(w http.ResponseWriter, r *http.Request) {
+	if s.agentConfig == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"enabled": false, "hasKey": false})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.agentConfig.Get())
+}
+
+func (s *server) handleUpdateAgentConfig(w http.ResponseWriter, r *http.Request) {
+	if s.agentConfig == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "agent config unavailable"})
+		return
+	}
+	var body struct {
+		Enabled           *bool   `json:"enabled"`
+		AutoAnswer        *bool   `json:"autoAnswer"`
+		OpenRouterKey     *string `json:"openRouterKey"`
+		Model             *string `json:"model"`
+		SystemPrompt      *string `json:"systemPrompt"`
+		Voice             *string `json:"voice"`
+		AzureSpeechKey    *string `json:"azureSpeechKey"`
+		AzureSpeechRegion *string `json:"azureSpeechRegion"`
+		GoogleCloudKey    *string `json:"googleCloudKey"`
+		HfToken           *string `json:"hfToken"`
+		CustomTtsURL      *string `json:"customTtsUrl"`
+		CustomTtsKey      *string `json:"customTtsKey"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	s.agentConfig.Update(body.Enabled, body.AutoAnswer, body.OpenRouterKey, body.Model, body.SystemPrompt, body.Voice, body.AzureSpeechKey, body.AzureSpeechRegion, body.GoogleCloudKey, body.HfToken, body.CustomTtsURL, body.CustomTtsKey)
+	s.broker.broadcast(map[string]any{
+		"type":   "agent-config",
+		"config": s.agentConfig.Get(),
+	})
+	writeJSON(w, http.StatusOK, s.agentConfig.Get())
+}
+
+func (s *server) handleToggleCallAgent(w http.ResponseWriter, r *http.Request) {
+	sid := r.PathValue("sid")
+	cid := r.PathValue("id")
+	sess := s.sessionByID(w, sid)
+	if sess == nil {
+		return
+	}
+	ac, ok := sess.reg.get(cid)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such call"})
+		return
+	}
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if ac.agent != nil {
+		ac.agent.SetEnabled(body.Enabled)
+		s.broker.emitAgentStatus(sid, cid, body.Enabled, "idle")
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"callId": cid, "agentEnabled": body.Enabled})
+}
+

@@ -90,14 +90,16 @@ func ParseRelayFromAck(ackNode *waBinary.Node) ParsedRelayAck {
 			case "token":
 				if b := wanode.NodeBytes(&rc); b != nil {
 					id := attrStringOr(rc.Attrs, "id", "0")
-					tokens[id] = base64.StdEncoding.EncodeToString(b)
-					rawTokens[id] = b
+					tokStr, raw := parseTokenBytes(b)
+					tokens[id] = tokStr
+					rawTokens[id] = raw
 				}
 			case "auth_token":
 				if b := wanode.NodeBytes(&rc); b != nil {
 					id := attrStringOr(rc.Attrs, "id", "0")
-					authTokens[id] = base64.StdEncoding.EncodeToString(b)
-					rawAuthTokens[id] = b
+					tokStr, raw := parseTokenBytes(b)
+					authTokens[id] = tokStr
+					rawAuthTokens[id] = raw
 				}
 			}
 		}
@@ -176,4 +178,24 @@ func sortRelaysByRtt(relays []core.RelayEndpoint) {
 			return *ri < *rj
 		}
 	})
+}
+
+func parseTokenBytes(b []byte) (string, []byte) {
+	if len(b) == 0 {
+		return "", nil
+	}
+	s := string(b)
+	isAsciiBase64 := true
+	for _, c := range b {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=') {
+			isAsciiBase64 = false
+			break
+		}
+	}
+	if isAsciiBase64 && len(b)%4 == 0 && len(b) > 8 {
+		if raw, err := base64.StdEncoding.DecodeString(s); err == nil && len(raw) > 0 {
+			return s, raw
+		}
+	}
+	return base64.StdEncoding.EncodeToString(b), b
 }

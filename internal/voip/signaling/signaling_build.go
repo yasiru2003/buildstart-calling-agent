@@ -11,8 +11,8 @@ import (
 )
 
 var (
-	capabilityOffer     = []byte{0x01, 0x05, 0xf7, 0x09, 0xe4, 0xbb, 0x07}
-	capabilityPreaccept = []byte{0x01, 0x05, 0xff, 0x09, 0xe4, 0xbb, 0x07}
+	capabilityOffer     = []byte{0x01, 0x05, 0xf7, 0x09, 0xe0, 0xfa, 0x53}
+	capabilityPreaccept = []byte{0x01, 0x05, 0xf7, 0x09, 0xe0, 0xfa, 0x53}
 )
 
 func BuildOfferStanza(ctx context.Context, sock core.VoipSocket, callID string, callKey []byte, peerJid types.JID, isVideo bool) (waBinary.Node, error) {
@@ -73,14 +73,28 @@ func BuildOfferStanza(ctx context.Context, sock core.VoipSocket, callID string, 
 	}, nil
 }
 
-func BuildAcceptStanza(ctx context.Context, sock core.VoipSocket, callID string, callKey []byte, peerJid, callCreator types.JID, isVideo bool) (waBinary.Node, error) {
-	if err := sock.AssertSessions(ctx, []types.JID{callCreator}, true); err != nil {
-		return waBinary.Node{}, fmt.Errorf("assert creator session: %w", err)
+func ensureTargetPeer(peerJid, callCreator types.JID) types.JID {
+	if peerJid.Device == 0 && callCreator.Device != 0 {
+		return callCreator
 	}
+	return peerJid
+}
 
-	nodes, includeDeviceIdentity, err := sock.CreateParticipantNodes(ctx, []types.JID{callCreator}, callKey, waBinary.Attrs{"count": "0"})
+func BuildAcceptStanza(ctx context.Context, sock core.VoipSocket, callID string, callKey []byte, peerJid, callCreator types.JID, isVideo bool) (waBinary.Node, error) {
+	target := ensureTargetPeer(peerJid, callCreator)
+	
+	rawDevices, err := sock.GetUSyncDevices(ctx, []types.JID{target, callCreator})
+	if err != nil || len(rawDevices) == 0 {
+		rawDevices = []types.JID{target}
+	}
+	_ = sock.AssertSessions(ctx, rawDevices, false)
+
+	nodes, includeDeviceIdentity, err := sock.CreateParticipantNodes(ctx, rawDevices, callKey, waBinary.Attrs{"count": "0"})
 	if err != nil {
-		return waBinary.Node{}, fmt.Errorf("encrypt accept: %w", err)
+		nodes, includeDeviceIdentity, err = sock.CreateParticipantNodes(ctx, []types.JID{target}, callKey, waBinary.Attrs{"count": "0"})
+		if err != nil {
+			return waBinary.Node{}, fmt.Errorf("encrypt accept: %w", err)
+		}
 	}
 
 	encNode := extractEncFromParticipant(nodes)
@@ -90,9 +104,10 @@ func BuildAcceptStanza(ctx context.Context, sock core.VoipSocket, callID string,
 
 	acceptContent := []waBinary.Node{
 		{Tag: "audio", Attrs: waBinary.Attrs{"enc": "opus", "rate": "16000"}},
-		{Tag: "net", Attrs: waBinary.Attrs{"medium": "3"}},
-		*encNode,
+		{Tag: "net", Attrs: waBinary.Attrs{"medium": "2"}},
 		{Tag: "encopt", Attrs: waBinary.Attrs{"keygen": "2"}},
+		{Tag: "capability", Attrs: waBinary.Attrs{"ver": "1"}, Content: capabilityOffer},
+		*encNode,
 	}
 	if includeDeviceIdentity {
 		if di, ok := sock.AccountDeviceIdentityNode(); ok {
@@ -103,9 +118,10 @@ func BuildAcceptStanza(ctx context.Context, sock core.VoipSocket, callID string,
 		acceptContent = append(acceptContent, waBinary.Node{Tag: "video", Attrs: waBinary.Attrs{"enc": "vp8"}})
 	}
 
+	cleanPeer := wanode.MustJID(wanode.CleanJID(peerJid.String()))
 	return waBinary.Node{
 		Tag:   "call",
-		Attrs: waBinary.Attrs{"to": wanode.MustJID(wanode.CleanJID(peerJid.String())), "id": GenerateCallStanzaID()},
+		Attrs: waBinary.Attrs{"to": cleanPeer, "id": GenerateCallStanzaID()},
 		Content: []waBinary.Node{{
 			Tag:     "accept",
 			Attrs:   waBinary.Attrs{"call-id": callID, "call-creator": callCreator},
@@ -145,16 +161,18 @@ func BuildRejectStanza(peerJid types.JID, callID string, callCreator types.JID) 
 }
 
 func BuildPreacceptStanza(peerJid types.JID, callID string, callCreator types.JID) waBinary.Node {
+	cleanPeer := wanode.MustJID(wanode.CleanJID(peerJid.String()))
 	return waBinary.Node{
 		Tag:   "call",
-		Attrs: waBinary.Attrs{"to": peerJid, "id": GenerateCallStanzaID()},
+		Attrs: waBinary.Attrs{"to": cleanPeer, "id": GenerateCallStanzaID()},
 		Content: []waBinary.Node{{
 			Tag:   "preaccept",
 			Attrs: waBinary.Attrs{"call-id": callID, "call-creator": callCreator},
 			Content: []waBinary.Node{
 				{Tag: "audio", Attrs: waBinary.Attrs{"enc": "opus", "rate": "16000"}},
+				{Tag: "net", Attrs: waBinary.Attrs{"medium": "3"}},
+				{Tag: "capability", Attrs: waBinary.Attrs{"ver": "1"}, Content: capabilityOffer},
 				{Tag: "encopt", Attrs: waBinary.Attrs{"keygen": "2"}},
-				{Tag: "capability", Attrs: waBinary.Attrs{"ver": "1"}, Content: capabilityPreaccept},
 			},
 		}},
 	}
@@ -201,7 +219,7 @@ func BuildRelayLatencyStanza(peerJid types.JID, callID string, callCreator types
 		content = append(content, waBinary.Node{Tag: "destination", Content: dst})
 	}
 
-	return callWrap(wanode.MustJID(wanode.CleanJID(peerJid.String())), waBinary.Node{
+	return callWrap(peerJid, waBinary.Node{
 		Tag:     "relaylatency",
 		Attrs:   waBinary.Attrs{"call-id": callID, "call-creator": callCreator},
 		Content: content,
@@ -209,7 +227,7 @@ func BuildRelayLatencyStanza(peerJid types.JID, callID string, callCreator types
 }
 
 func BuildTransportStanza(peerJid types.JID, callID string, callCreator types.JID) waBinary.Node {
-	return callWrap(wanode.MustJID(wanode.CleanJID(peerJid.String())), waBinary.Node{
+	return callWrap(peerJid, waBinary.Node{
 		Tag: "transport",
 		Attrs: waBinary.Attrs{
 			"call-id": callID, "call-creator": callCreator,
@@ -219,10 +237,28 @@ func BuildTransportStanza(peerJid types.JID, callID string, callCreator types.JI
 	})
 }
 
-func BuildMuteV2Stanza(peerDeviceJid types.JID, callID string, callCreator types.JID, muteState int) waBinary.Node {
+func BuildTransportReplyStanza(peerJid types.JID, callID string, callCreator types.JID) waBinary.Node {
+	cleanPeer := wanode.MustJID(wanode.CleanJID(peerJid.String()))
 	return waBinary.Node{
 		Tag:   "call",
-		Attrs: waBinary.Attrs{"to": peerDeviceJid, "id": GenerateCallStanzaID()},
+		Attrs: waBinary.Attrs{"to": cleanPeer, "id": GenerateCallStanzaID()},
+		Content: []waBinary.Node{{
+			Tag: "transport",
+			Attrs: waBinary.Attrs{
+				"call-id":                callID,
+				"call-creator":           callCreator,
+				"transport-message-type": "9",
+			},
+			Content: []waBinary.Node{{Tag: "net", Attrs: waBinary.Attrs{"medium": "2"}}},
+		}},
+	}
+}
+
+func BuildMuteV2Stanza(peerDeviceJid types.JID, callID string, callCreator types.JID, muteState int) waBinary.Node {
+	cleanPeer := wanode.MustJID(wanode.CleanJID(peerDeviceJid.String()))
+	return waBinary.Node{
+		Tag:   "call",
+		Attrs: waBinary.Attrs{"to": cleanPeer, "id": GenerateCallStanzaID()},
 		Content: []waBinary.Node{{
 			Tag: "mute_v2",
 			Attrs: waBinary.Attrs{
@@ -245,9 +281,10 @@ func BuildAcceptReceiptStanza(peerDeviceJid types.JID, acceptMsgID, callID strin
 }
 
 func callWrap(to types.JID, inner waBinary.Node) waBinary.Node {
+	cleanTo := wanode.MustJID(wanode.CleanJID(to.String()))
 	return waBinary.Node{
 		Tag:     "call",
-		Attrs:   waBinary.Attrs{"to": to, "id": GenerateCallStanzaID()},
+		Attrs:   waBinary.Attrs{"to": cleanTo, "id": GenerateCallStanzaID()},
 		Content: []waBinary.Node{inner},
 	}
 }

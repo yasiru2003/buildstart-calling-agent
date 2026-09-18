@@ -10,7 +10,21 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"go.mau.fi/whatsmeow/proto/waCompanionReg"
+	"go.mau.fi/whatsmeow/store"
+	"google.golang.org/protobuf/proto"
 )
+
+func init() {
+	store.DeviceProps.PlatformType = waCompanionReg.DeviceProps_CHROME.Enum()
+	store.DeviceProps.Os = proto.String("Mac OS")
+	store.DeviceProps.RequireFullSync = proto.Bool(false)
+	if store.DeviceProps.HistorySyncConfig != nil {
+		store.DeviceProps.HistorySyncConfig.SupportCallLogHistory = proto.Bool(true)
+	}
+	store.SetOSInfo("Mac OS", [3]uint32{14, 5, 0})
+}
 
 func main() {
 	addr := flag.String("addr", ":8080", "HTTP listen address")
@@ -18,6 +32,18 @@ func main() {
 	staticDir := flag.String("static", "client/dist", "static client directory (optional)")
 	debug := flag.Bool("debug", false, "verbose logging")
 	maxCalls := flag.Int("max-calls-per-session", 8, "max concurrent calls per session (0 = unlimited)")
+
+	defaultKey := os.Getenv("OPENROUTER_API_KEY")
+	if defaultKey == "" {
+		defaultKey = "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"
+	}
+	openRouterKey := flag.String("openrouter-key", defaultKey, "OpenRouter API Key for AI Agent")
+	aiModel := flag.String("ai-model", "openrouter/auto", "AI Model identifier for OpenRouter")
+	aiPrompt := flag.String("ai-prompt", "", "Custom system prompt for the AI Voice Agent")
+	aiVoice := flag.String("ai-voice", "si-LK-ThiliniNeural", "Voice model for Text-to-Speech")
+	aiAutoAnswer := flag.Bool("ai-auto-answer", true, "Automatically answer incoming WhatsApp calls with AI Agent")
+	aiEnabled := flag.Bool("ai-agent", true, "Enable AI Agent voice assistance")
+
 	flag.Parse()
 
 	level := slog.LevelInfo
@@ -30,7 +56,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	srv, err := newServer(ctx, *dbPath, *staticDir, *maxCalls, log)
+	agentCfg := newAgentConfig(*openRouterKey, *aiModel, *aiPrompt, *aiVoice, *aiAutoAnswer, *aiEnabled)
+
+	srv, err := newServer(ctx, *dbPath, *staticDir, *maxCalls, agentCfg, log)
 	if err != nil {
 		log.Error("startup failed", "err", err)
 		os.Exit(1)

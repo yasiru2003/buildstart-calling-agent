@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"wacalls/internal/agent"
 	"wacalls/internal/voip/call"
 	"wacalls/internal/voip/core"
 	"wacalls/internal/voip/signaling"
@@ -49,8 +50,40 @@ func newSession(mgr *SessionManager, id, name string, client *whatsmeow.Client) 
 
 func (s *Session) createCall(callID string) *call.CallManager {
 	cm := call.NewCallManager(wa.NewSocket(s.client), s.log)
+	ac := &activeCall{cm: cm}
+
+	if cfg := s.mgr.agentConfig; cfg != nil {
+		ag := agent.NewAIAgent(cfg.RawKey(), cfg.CurrentModel(), cfg.CurrentPrompt(), s.log.With("call_id", callID))
+		if azKey, azReg := cfg.AzureConfig(); azKey != "" {
+			ag.SetAzureTTS(azKey, azReg)
+		}
+		if gKey := cfg.GoogleConfig(); gKey != "" {
+			ag.SetGoogleCloudTTS(gKey)
+		}
+		if hfTok := cfg.HuggingFaceToken(); hfTok != "" {
+			ag.SetHuggingFaceTTS(hfTok)
+		}
+		if cURL, cKey := cfg.CustomTts(); cURL != "" {
+			ag.SetOpenAITTS(cURL, cKey)
+		}
+		if voice := cfg.CurrentVoice(); voice != "" {
+			ag.SetVoice(voice)
+		}
+		ag.SetEnabled(cfg.IsEnabled())
+		ag.FeedAudio = func(pcm []float32) {
+			cm.FeedCapturedPCM(pcm)
+		}
+		ag.OnTranscript = func(msg agent.TranscriptMessage) {
+			s.mgr.broker.emitAgentTranscript(s.id, callID, msg.Role, msg.Text, msg.Timestamp)
+		}
+		ag.OnStateChange = func(state agent.AgentState) {
+			s.mgr.broker.emitAgentStatus(s.id, callID, ag.IsEnabled(), string(state))
+		}
+		ac.agent = ag
+	}
+
 	s.wireCall(cm, callID)
-	s.reg.add(callID, &activeCall{cm: cm})
+	s.reg.add(callID, ac)
 	return cm
 }
 
@@ -64,6 +97,9 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 	}
 	cm.OnStateChange = func(c *call.CallInfo) {
 		if c.IsEnded() {
+			if ac, ok := s.reg.get(c.CallID); ok && ac.agent != nil {
+				ac.agent.Close()
+			}
 			s.removeCall(c.CallID)
 			s.mgr.broker.endCall(c.CallID, string(c.StateData.EndReason))
 			return
@@ -81,18 +117,31 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 			rec.Owner = existing.Owner
 			rec.StartedAt = existing.StartedAt
 		}
+		if c.StateData.State == core.CallStateActive {
+			if ac, ok := s.reg.get(c.CallID); ok && ac.agent != nil && ac.agent.IsEnabled() {
+				ac.agent.GreetCaller()
+			}
+		}
 		s.mgr.broker.upsertCall(rec)
 	}
 	cm.OnEnded = func(c *call.CallInfo) {
+		if ac, ok := s.reg.get(c.CallID); ok && ac.agent != nil {
+			ac.agent.Close()
+		}
 		s.removeCall(c.CallID)
 		s.mgr.broker.endCall(c.CallID, string(c.StateData.EndReason))
 	}
 	cm.OnPeerAudio = func(pcm16 []float32) {
 		ac, ok := s.reg.get(callID)
-		if !ok || ac.bridge == nil {
+		if !ok {
 			return
 		}
-		_ = ac.bridge.WritePCM(pcm16)
+		if ac.bridge != nil {
+			_ = ac.bridge.WritePCM(pcm16)
+		}
+		if ac.agent != nil && ac.agent.IsEnabled() {
+			ac.agent.FeedPeerAudio(pcm16)
+		}
 	}
 }
 
@@ -126,6 +175,21 @@ func (s *Session) onIncomingOffer(ctx context.Context, evt *events.CallOffer) {
 	}
 	cm := s.createCall(callID)
 	cm.HandleCallOffer(ctx, node, evt.From)
+
+	if s.mgr.agentConfig != nil && s.mgr.agentConfig.IsAutoAnswer() {
+		s.log.Info("auto-answering incoming WhatsApp call after 1.2s ring with AI Agent", "call_id", callID)
+		go func() {
+			// Pre-synthesize the greeting during the ring delay so it plays instantly on connect
+			if ac, ok := s.reg.get(callID); ok && ac.agent != nil {
+				ac.agent.PrewarmGreeting()
+			}
+			time.Sleep(1200 * time.Millisecond)
+			s.mgr.broker.emitIncomingClaimed(s.id, callID, "ai-agent")
+			if err := cm.AcceptCall(context.Background(), callID); err != nil {
+				s.log.Error("failed to auto-answer incoming call", "call_id", callID, "err", err)
+			}
+		}()
+	}
 }
 
 func (s *Session) rejectOffer(ctx context.Context, node *waBinary.Node, from types.JID) {
@@ -164,11 +228,11 @@ func (s *Session) handleEvent(rawEvt any) {
 		}
 	case *events.CallTerminate:
 		if ac, ok := s.callForEvent(evt.From, evt.Data); ok {
-			ac.cm.HandleCallTerminate(wrapCall(evt.From, evt.Data))
+			ac.cm.HandleCallTerminate(wrapCall(evt.From, evt.Data), evt.From)
 		}
 	case *events.CallReject:
 		if ac, ok := s.callForEvent(evt.From, evt.Data); ok {
-			ac.cm.HandleCallTerminate(wrapCall(evt.From, evt.Data))
+			ac.cm.HandleCallTerminate(wrapCall(evt.From, evt.Data), evt.From)
 		}
 	}
 }
@@ -280,7 +344,7 @@ func (s *Session) shutdown() {
 
 func mapStatus(state core.CallState) CallStatus {
 	switch state {
-	case core.CallStateActive:
+	case core.CallStateActive, core.CallStateConnecting:
 		return StatusConnected
 	case core.CallStateEnded:
 		return StatusEnded

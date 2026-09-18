@@ -11,6 +11,7 @@ import (
 	"wacalls/internal/voip/transport"
 	"wacalls/internal/voip/wanode"
 
+	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/types"
 )
 
@@ -39,8 +40,9 @@ type CallManager struct {
 	encodeBuf    []float32
 	encodeBufPos int
 
-	lastCaptureAt time.Time
-	keepaliveStop chan struct{}
+	lastCaptureAt  time.Time
+	keepaliveStop  chan struct{}
+	outPacketCount int
 
 	OnStateChange func(*CallInfo)
 	OnIncoming    func(*CallInfo)
@@ -55,7 +57,7 @@ func NewCallManager(sock core.VoipSocket, log *slog.Logger) *CallManager {
 	m := &CallManager{
 		sock:        sock,
 		log:         log,
-		debeEnabled: true,
+		debeEnabled: false,
 	}
 	relay := transport.NewSctpRelayManager(log)
 	relay.SetOnConnected(func(ip string, port int) { m.onRelayConnected() })
@@ -136,6 +138,10 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 		m.mu.Unlock()
 		return &CallError{"no incoming call with id " + callID}
 	}
+	if call.StateData.State == core.CallStateActive || call.StateData.State == core.CallStateConnecting {
+		m.mu.Unlock()
+		return nil
+	}
 	if !call.CanAccept() {
 		m.mu.Unlock()
 		return &CallError{"call cannot be accepted in state " + string(call.StateData.State)}
@@ -145,21 +151,72 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 	key := call.EncryptionKey
 	peer := wanode.MustJID(call.PeerJid)
 	creator := wanode.MustJID(call.CallCreator)
+	targetPeer := peer
+	if targetPeer.Device == 0 && creator.Device != 0 {
+		targetPeer = creator
+	}
 	isVideo := call.MediaType == core.CallMediaTypeVideo
 	relayData := call.RelayData
 	m.mu.Unlock()
 
 	if key != nil {
-		acceptNode, err := signaling.BuildAcceptStanza(ctx, m.sock, callID, key, peer, creator, isVideo)
+		acceptNode, err := signaling.BuildAcceptStanza(ctx, m.sock, callID, key, targetPeer, creator, isVideo)
 		if err != nil {
 			m.log.Error("build accept failed", "err", err)
-		} else if err := m.sock.SendNode(ctx, acceptNode); err != nil {
-			m.log.Error("accept send error", "err", err)
+		} else {
+			m.log.Info("accept raw node", "xml", acceptNode.String())
+			if err := m.sock.SendNode(ctx, acceptNode); err != nil {
+				m.log.Error("accept send error", "err", err)
+			}
+		}
+
+		cleanPeer := wanode.MustJID(wanode.CleanJID(peer.String()))
+		transport := waBinary.Node{
+			Tag:   "call",
+			Attrs: waBinary.Attrs{"to": cleanPeer, "id": signaling.GenerateCallStanzaID()},
+			Content: []waBinary.Node{{
+				Tag: "transport",
+				Attrs: waBinary.Attrs{
+					"call-id": callID, "call-creator": creator,
+					"transport-message-type": "1", "p2p-cand-round": "1",
+				},
+				Content: []waBinary.Node{{Tag: "net", Attrs: waBinary.Attrs{"medium": "2", "protocol": "0"}}},
+			}},
+		}
+		_ = m.sock.SendNode(ctx, transport)
+		_ = m.sock.SendNode(ctx, signaling.BuildMuteV2Stanza(cleanPeer, callID, creator, 0))
+
+		if relayData != nil && len(relayData.Endpoints) > 0 {
+			var entries []signaling.RelayLatencyEntry
+			for _, ep := range relayData.Endpoints {
+				rtt := 70
+				if ep.C2RRtt != nil {
+					rtt = *ep.C2RRtt
+				}
+				entries = append(entries, signaling.RelayLatencyEntry{
+					RelayName:    ep.RelayName,
+					Latency:      rtt,
+					AddressBytes: ep.AddressBytes,
+				})
+			}
+			_ = m.sock.SendNode(ctx, signaling.BuildRelayLatencyStanza(cleanPeer, callID, creator, entries, nil))
 		}
 	}
 
 	if relayData != nil {
 		m.setupIncomingMedia(call, relayData)
+	}
+
+	if m.relay.HasConnection() {
+		m.mu.Lock()
+		if err := call.ApplyTransition(Transition{Type: TransitionMediaConnected}); err == nil {
+			m.emitState()
+			m.startSilenceKeepaliveLocked()
+			m.log.Info("call ACTIVE (media path established)", "call_id", callID, "audio", m.codec != nil)
+		}
+		m.mu.Unlock()
+		m.relay.ResendSubscriptions()
+	} else if relayData != nil {
 		m.connectRelays(relayData.Endpoints)
 	} else {
 		m.log.Warn("call accepted but no relay endpoints yet; media path waits for a transport message", "call_id", callID)
@@ -171,18 +228,30 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 func (m *CallManager) setupIncomingMedia(call *CallInfo, relayData *core.RelayData) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if len(relayData.ParticipantJids) > 0 {
-		ourBase := wanode.CleanJID(m.ownCredJid())
-		ourDeviceJid := ensureDeviceJid(findOurDevice(relayData.ParticipantJids, ourBase, m.ownCredJid()))
-		if newSelf := media.GenerateSecureSsrc(call.CallID, ourDeviceJid, 0); newSelf != m.selfSsrc {
-			m.selfSsrc = newSelf
-			m.rtpSession = media.NewWhatsAppOpusSession(newSelf)
+	selfPid := 0
+	peerPid := 0
+	if relayData != nil {
+		if relayData.SelfPid != nil {
+			selfPid = *relayData.SelfPid
 		}
-		if peer := firstPeerDevice(relayData.ParticipantJids, ourBase); peer != "" {
-			m.peerSsrcs = []uint32{media.GenerateSecureSsrc(call.CallID, ensureDeviceJid(peer), 0)}
-			m.actualPeerSet = true
+		if relayData.PeerPid != nil {
+			peerPid = *relayData.PeerPid
+		}
+		if len(relayData.ParticipantJids) > 0 {
+			ourBase := wanode.CleanJID(m.ownCredJid())
+			ourDeviceJid := ensureDeviceJid(findOurDevice(relayData.ParticipantJids, ourBase, m.ownCredJid()))
+			if newSelf := media.GenerateSecureSsrc(call.CallID, ourDeviceJid, 0); newSelf != m.selfSsrc {
+				m.selfSsrc = newSelf
+				m.rtpSession = media.NewWhatsAppOpusSession(newSelf)
+			}
+			if peer := firstPeerDevice(relayData.ParticipantJids, ourBase); peer != "" {
+				m.peerSsrcs = []uint32{media.GenerateSecureSsrc(call.CallID, ensureDeviceJid(peer), 0)}
+				m.actualPeerSet = true
+			}
 		}
 	}
+	m.relay.SetPids(selfPid, peerPid)
+	m.relay.SetSsrc(m.selfSsrc)
 	m.relay.SetSubscriptionSsrc(firstSsrc(m.peerSsrcs))
 	m.initSrtpKeysLocked()
 }

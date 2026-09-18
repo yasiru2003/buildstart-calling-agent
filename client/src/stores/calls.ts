@@ -25,13 +25,36 @@ export const ensureCallsWired = (): void => {
     if (ev.type === "call-list") {
       useCalls.setState({ calls: ev.calls });
     } else if (ev.type === "call-status") {
-      useCalls.setState((s) => ({
-        calls: s.calls.map((c) =>
-          c.callId === ev.id
-            ? { ...c, sessionId: ev.sessionId, status: ev.status, peer: ev.peer, startedAt: ev.startedAt }
-            : c,
-        ),
-      }));
+      useCalls.setState((s) => {
+        const isLive = ev.status === "connected";
+        const clearModal = isLive && s.incoming?.callId === ev.id;
+        const exists = s.calls.some((c) => c.callId === ev.id);
+        if (exists) {
+          return {
+            incoming: clearModal ? null : s.incoming,
+            calls: s.calls.map((c) =>
+              c.callId === ev.id
+                ? { ...c, sessionId: ev.sessionId, status: ev.status, peer: ev.peer, startedAt: ev.startedAt, owner: ev.owner }
+                : c,
+            ),
+          };
+        }
+        return {
+          incoming: clearModal ? null : s.incoming,
+          calls: [
+            ...s.calls,
+            {
+              callId: ev.id,
+              sessionId: ev.sessionId,
+              status: ev.status,
+              peer: ev.peer,
+              startedAt: ev.startedAt,
+              owner: ev.owner,
+              direction: "inbound",
+            },
+          ],
+        };
+      });
     } else if (ev.type === "call-ended") {
       useCalls.setState((s) => {
         const conn = s.ownConnections.get(ev.id);

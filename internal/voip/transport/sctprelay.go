@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"encoding/binary"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -56,6 +57,8 @@ type SctpRelayManager struct {
 
 	audioSsrc        uint32
 	subscriptionSsrc uint32
+	selfPid          int
+	peerPid          int
 
 	onConnected func(ip string, port int)
 
@@ -75,6 +78,11 @@ func NewSctpRelayManager(log *slog.Logger) *SctpRelayManager {
 func (m *SctpRelayManager) SetSsrc(ssrc uint32) { m.audioSsrc = ssrc }
 
 func (m *SctpRelayManager) SetSubscriptionSsrc(ssrc uint32) { m.subscriptionSsrc = ssrc }
+
+func (m *SctpRelayManager) SetPids(selfPid, peerPid int) {
+	m.selfPid = selfPid
+	m.peerPid = peerPid
+}
 
 func (m *SctpRelayManager) SetOnConnected(fn func(ip string, port int)) { m.onConnected = fn }
 
@@ -128,7 +136,7 @@ func (m *SctpRelayManager) ConfigureRelays(relays []RelayConfig) {
 
 func (m *SctpRelayManager) connectToRelay(info RelayConfig) {
 	id := connID(info.IP, info.Port, info.AuthTokenID)
-	m.log.Info("relay connecting", "id", id, "name", info.Name)
+	m.log.Info("relay connecting", "id", id, "name", info.Name, "tokenLen", len(info.Token), "authTokLen", len(info.AuthToken), "keyLen", len(info.Key))
 
 	conn := &relayConnection{
 		state:  relayStateConnecting,
@@ -175,6 +183,19 @@ func (m *SctpRelayManager) connectToRelay(info RelayConfig) {
 	})
 	channel.OnClose(func() { m.closeConnection(id) })
 	channel.OnMessage(func(msg webrtc.DataChannelMessage) {
+		m.log.Info("relay datachannel message received", "id", id, "len", len(msg.Data), "type", ClassifyPacket(msg.Data))
+		if len(msg.Data) >= 20 && IsStunPacket(msg.Data) {
+			msgType := int(binary.BigEndian.Uint16(msg.Data[0:]))
+			if msgType == 0x0801 { // wa-ping
+				pong := BuildWhatsAppPong(msg.Data[8:20])
+				m.sendRaw(conn, pong)
+				m.log.Debug("sent wa-pong response", "id", id)
+			} else if msgType == 0x0001 { // STUN binding request
+				resp := BuildBindingResponse(msg.Data[8:20], []byte(info.Key))
+				m.sendRaw(conn, resp)
+				m.log.Debug("sent stun binding response", "id", id)
+			}
+		}
 		if m.onReceive != nil {
 			m.onReceive(msg.Data)
 		}
@@ -290,13 +311,19 @@ func (m *SctpRelayManager) sendStunRegistration(conn *relayConnection) {
 			if m.subscriptionSsrc != 0 {
 				peerSsrcs = []uint32{m.subscriptionSsrc}
 			}
-			ssrcList := BuildSSRCSubscriptionList([]uint32{m.audioSsrc}, peerSsrcs, 0, 0)
+			selfPid := m.selfPid
+			peerPid := m.peerPid
+			if selfPid == 0 && peerPid == 0 {
+				selfPid = 1
+				peerPid = 2
+			}
+			ssrcList := BuildSSRCSubscriptionList([]uint32{m.audioSsrc}, peerSsrcs, selfPid, peerPid)
 			m.sendRaw(conn, BuildAllocateForRelay(info.RawToken, ssrcList, hmacKey, info.IP, info.Port))
 		}
 	}
 
 	send()
-	for _, d := range []time.Duration{50, 150, 500, 3000} {
+	for _, d := range []time.Duration{50, 150, 500} {
 		delay := d * time.Millisecond
 		go func() {
 			select {
@@ -428,6 +455,8 @@ func (m *SctpRelayManager) Cleanup() {
 	m.connections = map[string]*relayConnection{}
 	m.audioSsrc = 0
 	m.subscriptionSsrc = 0
+	m.selfPid = 0
+	m.peerPid = 0
 	m.mu.Unlock()
 	for _, c := range conns {
 		m.teardown(c)

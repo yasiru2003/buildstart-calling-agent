@@ -162,6 +162,21 @@ func BuildWhatsAppPing() []byte {
 	return header
 }
 
+func BuildWhatsAppPong(txid []byte) []byte {
+	header := make([]byte, 20)
+	binary.BigEndian.PutUint16(header[0:], 0x0802)
+	binary.BigEndian.PutUint16(header[2:], 0)
+	binary.BigEndian.PutUint32(header[4:], stunMagicCookie)
+	if len(txid) >= 12 {
+		copy(header[8:], txid[:12])
+	}
+	return header
+}
+
+func BuildBindingResponse(txid []byte, hmacKey []byte) []byte {
+	return buildStunMessage(0x0101, nil, txid, hmacKey, true)
+}
+
 func IsStunPacket(data []byte) bool {
 	if len(data) < 2 {
 		return false

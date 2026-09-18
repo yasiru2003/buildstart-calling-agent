@@ -3,12 +3,14 @@ package main
 import (
 	"sync"
 
+	"wacalls/internal/agent"
 	"wacalls/internal/voip/call"
 )
 
 type activeCall struct {
 	cm     *call.CallManager
 	bridge *Bridge
+	agent  *agent.AIAgent
 }
 
 type callRegistry struct {

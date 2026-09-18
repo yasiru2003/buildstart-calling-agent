@@ -10,6 +10,7 @@ import { IncomingCallModal } from "@/components/domain/call/IncomingCallModal";
 import { EmptyState } from "@/components/shared/EmptyState";
 import { ensureSessionsWired, useSessions } from "@/stores/sessions";
 import { ensureCallsWired } from "@/stores/calls";
+import { ensureAgentWired } from "@/stores/agent";
 import { useTheme } from "@/stores/theme";
 
 export const App = () => {
@@ -20,6 +21,7 @@ export const App = () => {
   useEffect(() => {
     ensureSessionsWired();
     ensureCallsWired();
+    ensureAgentWired();
   }, []);
 
   const active = sessions.find((s) => s.id === activeId) ?? null;

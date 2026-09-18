@@ -21,7 +21,30 @@ export type BrokerEvent =
   | { type: "call-status"; sessionId: string; id: string; owner: string | null; status: CallStatus; peer: string; startedAt: number }
   | { type: "call-ended"; sessionId: string; id: string; owner: string | null; reason: string; endedAt: number }
   | { type: "incoming"; sessionId: string; id: string; peer: string; offeredAt: number }
-  | { type: "incoming-claimed"; sessionId: string; id: string; owner: string };
+  | { type: "incoming-claimed"; sessionId: string; id: string; owner: string }
+  | { type: "agent-transcript"; sessionId: string; callId: string; role: "user" | "assistant" | "system"; text: string; timestamp: number }
+  | { type: "agent-status"; sessionId: string; callId: string; enabled: boolean; state: string }
+  | { type: "agent-config"; config: AgentConfigData };
+
+export type AgentConfigData = {
+  enabled: boolean;
+  autoAnswer: boolean;
+  openRouterKey: string;
+  hasKey: boolean;
+  model: string;
+  systemPrompt: string;
+  voice: string;
+  azureSpeechKey?: string;
+  hasAzureKey?: boolean;
+  azureSpeechRegion?: string;
+  googleCloudKey?: string;
+  hasGoogleKey?: boolean;
+  hfToken?: string;
+  hasHfToken?: boolean;
+  customTtsUrl?: string;
+  customTtsKey?: string;
+  hasCustomTtsKey?: boolean;
+};
 
 type Listener = (ev: BrokerEvent) => void;
 

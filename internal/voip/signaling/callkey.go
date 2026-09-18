@@ -67,13 +67,22 @@ func DecryptCallKeyInNode(ctx context.Context, sock core.VoipSocket, inner *waBi
 }
 
 func DecodeCallKeyPlaintext(plaintext []byte) ([]byte, error) {
+	if len(plaintext) == 32 {
+		return plaintext, nil
+	}
 	var msg waE2E.Message
-	if err := proto.Unmarshal(plaintext, &msg); err != nil {
-		return nil, err
+	if err := proto.Unmarshal(plaintext, &msg); err == nil {
+		if key := msg.GetCall().GetCallKey(); len(key) == 32 {
+			return key, nil
+		}
 	}
-	key := msg.GetCall().GetCallKey()
-	if len(key) != 32 {
-		return nil, fmt.Errorf("invalid callKey: expected 32 bytes, got %d", len(key))
+	if unpadded, err := unpadRandomMax16(plaintext); err == nil {
+		var msgPadded waE2E.Message
+		if err := proto.Unmarshal(unpadded, &msgPadded); err == nil {
+			if key := msgPadded.GetCall().GetCallKey(); len(key) == 32 {
+				return key, nil
+			}
+		}
 	}
-	return key, nil
+	return nil, fmt.Errorf("failed to extract 32-byte callKey from plaintext (len %d)", len(plaintext))
 }

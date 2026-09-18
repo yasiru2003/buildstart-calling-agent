@@ -65,6 +65,10 @@ func (s *Socket) GetUSyncDevices(ctx context.Context, jids []types.JID) ([]types
 }
 
 func (s *Socket) AssertSessions(ctx context.Context, jids []types.JID, force bool) error {
+	if len(jids) == 0 {
+		return nil
+	}
+	s.di().FetchPreKeysNoError(ctx, jids)
 	return nil
 }
 

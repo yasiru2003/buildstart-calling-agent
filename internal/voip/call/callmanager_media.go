@@ -73,6 +73,10 @@ func (m *CallManager) sendOpusFrameLocked(opus []byte) {
 		m.log.Debug("srtp protect error", "err", err)
 		return
 	}
+	m.outPacketCount++
+	if m.outPacketCount%50 == 1 {
+		m.log.Info("transmitting audio packets to WhatsApp relay", "seq", pkt.Header.SequenceNumber, "total", m.outPacketCount, "bytes", len(srtp))
+	}
 	m.relay.Broadcast(srtp)
 }
 
@@ -134,6 +138,7 @@ func (m *CallManager) onRelayData(data []byte) {
 	if !m.actualPeerSet {
 		m.actualPeerSet = true
 		if !containsSsrc(m.peerSsrcs, ssrc) {
+			m.log.Info("detected peer ssrc from incoming media", "ssrc", ssrc)
 			m.peerSsrcs = []uint32{ssrc}
 			m.relay.SetSubscriptionSsrc(ssrc)
 			go m.relay.ResendSubscriptions()
@@ -145,7 +150,7 @@ func (m *CallManager) onRelayData(data []byte) {
 
 	pkt, err := srtp.Unprotect(data)
 	if err != nil {
-		m.log.Debug("srtp unprotect error", "err", err)
+		m.log.Debug("srtp unprotect error", "err", err, "ssrc", ssrc, "len", len(data))
 		return
 	}
 	if len(pkt.Payload) == 0 {
@@ -153,6 +158,7 @@ func (m *CallManager) onRelayData(data []byte) {
 	}
 	pcm, err := codec.Decode(pkt.Payload)
 	if err != nil {
+		m.log.Debug("opus decode error", "err", err)
 		return
 	}
 	pcm = media.NormalizeFrame(pcm, codec.FrameSize())
