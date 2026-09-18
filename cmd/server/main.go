@@ -12,18 +12,25 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow/proto/waCompanionReg"
+	"go.mau.fi/whatsmeow/proto/waWa6"
 	"go.mau.fi/whatsmeow/store"
 	"google.golang.org/protobuf/proto"
 )
 
 func init() {
-	store.DeviceProps.PlatformType = waCompanionReg.DeviceProps_CHROME.Enum()
+	store.DeviceProps.PlatformType = waCompanionReg.DeviceProps_CATALINA.Enum()
 	store.DeviceProps.Os = proto.String("Mac OS")
 	store.DeviceProps.RequireFullSync = proto.Bool(false)
 	if store.DeviceProps.HistorySyncConfig != nil {
 		store.DeviceProps.HistorySyncConfig.SupportCallLogHistory = proto.Bool(true)
 	}
 	store.SetOSInfo("Mac OS", [3]uint32{14, 5, 0})
+	if store.BaseClientPayload != nil && store.BaseClientPayload.UserAgent != nil {
+		store.BaseClientPayload.UserAgent.Platform = waWa6.ClientPayload_UserAgent_MACOS.Enum()
+	}
+	if store.BaseClientPayload != nil && store.BaseClientPayload.WebInfo != nil {
+		store.BaseClientPayload.WebInfo.WebSubPlatform = waWa6.ClientPayload_WebInfo_DARWIN.Enum()
+	}
 }
 
 func main() {
