@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -96,9 +97,16 @@ func (s *Session) createCall(callID string) *call.CallManager {
 
 func (s *Session) wireCall(cm *call.CallManager, callID string) {
 	cm.OnIncoming = func(c *call.CallInfo) {
+		peerNum := formatPhoneNumber(c.PeerJid)
+		now := time.Now().UnixMilli()
 		s.mgr.broker.upsertCall(CallRecord{
-			SessionID: s.id, CallID: c.CallID, Direction: "inbound", Peer: c.PeerJid,
-			StartedAt: time.Now().UnixMilli(), Status: StatusRinging,
+			SessionID: s.id, CallID: c.CallID, Direction: "inbound", Peer: c.PeerJid, PeerNumber: peerNum,
+			StartedAt: now, Status: StatusRinging, Outcome: "Incoming Call",
+			Events: []CallEventLog{{
+				Timestamp: now,
+				Type:      "incoming",
+				Message:   "Incoming call ringing from " + peerNum,
+			}},
 		})
 		s.mgr.broker.emitIncoming(s.id, c.CallID, c.PeerJid)
 	}
@@ -116,15 +124,28 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 			dir = "inbound"
 		}
 		existing, _ := s.mgr.broker.getCall(c.CallID)
+		peerNum := formatPhoneNumber(c.PeerJid)
 		rec := CallRecord{
-			SessionID: s.id, CallID: c.CallID, Direction: dir, Peer: c.PeerJid,
+			SessionID: s.id, CallID: c.CallID, Direction: dir, Peer: c.PeerJid, PeerNumber: peerNum,
 			StartedAt: time.Now().UnixMilli(), Status: mapStatus(c.StateData.State),
 		}
 		if existing != nil {
 			rec.Owner = existing.Owner
 			rec.StartedAt = existing.StartedAt
+			if existing.PeerNumber != "" {
+				rec.PeerNumber = existing.PeerNumber
+			}
+			rec.Direction = existing.Direction
+			rec.TriggerReason = existing.TriggerReason
+			rec.Outcome = existing.Outcome
+			rec.Events = existing.Events
+			rec.Transcripts = existing.Transcripts
 		}
 		if c.StateData.State == core.CallStateActive {
+			now := time.Now().UnixMilli()
+			rec.ConnectedAt = &now
+			rec.Status = StatusConnected
+			s.mgr.broker.recordCallEvent(c.CallID, "connected", "Call connected (WebRTC relay established, audio streaming active)", "")
 			if ac, ok := s.reg.get(c.CallID); ok && ac.agent != nil && ac.agent.IsEnabled() {
 				ac.agent.GreetCaller()
 			}
@@ -141,20 +162,35 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 				ac.agent.Close()
 			}
 		}
-		s.removeCall(c.CallID)
-		s.mgr.broker.endCall(c.CallID, string(c.StateData.EndReason))
+
+		// Calculate duration
+		durSec := 0
+		if c.StateData.ConnectedAt != nil {
+			durSec = int(time.Since(*c.StateData.ConnectedAt).Seconds())
+		}
+		endMsg := fmt.Sprintf("Call terminated (%s, duration: %ds)", c.StateData.EndReason, durSec)
+		s.mgr.broker.recordCallEvent(c.CallID, "end", endMsg, "")
 
 		// If inbound call was missed/unanswered, OR dropped/ended quickly (<15s) without any conversation:
 		isShortOrDropped := c.StateData.ConnectedAt == nil || time.Since(*c.StateData.ConnectedAt) < 15*time.Second || !hadConversation
 		if c.Direction == core.CallDirectionIncoming && isShortOrDropped {
+			s.mgr.broker.setCallOutcome(c.CallID, "Missed / Dropped", "Inbound call ended quickly without conversation. Triggering Auto-Callback.")
 			peer := callbackJID
 			if peer.IsEmpty() {
 				peer, _ = types.ParseJID(c.PeerJid)
 			}
 			if !peer.IsEmpty() {
+				s.mgr.broker.recordCallEvent(c.CallID, "callback_trigger", "Auto-Callback scheduled to "+formatPhoneNumber(peer.User), "Reason: uncompleted_inbound")
 				s.scheduleAutoCallback(peer.ToNonAD(), "inbound_missed_or_dropped: "+string(c.StateData.EndReason))
 			}
+		} else if hadConversation {
+			s.mgr.broker.setCallOutcome(c.CallID, "Completed (AI Voice Handled)", "AI Assistant conducted a voice conversation with the caller.")
+		} else {
+			s.mgr.broker.setCallOutcome(c.CallID, "Completed", "")
 		}
+
+		s.removeCall(c.CallID)
+		s.mgr.broker.endCall(c.CallID, string(c.StateData.EndReason))
 	}
 	cm.OnPeerAudio = func(pcm16 []float32) {
 		ac, ok := s.reg.get(callID)
@@ -179,8 +215,30 @@ func (s *Session) startOutgoingWithGreeting(ctx context.Context, peer types.JID,
 		}
 		ac.agent.PrewarmGreeting()
 	}
+	dir := "outbound"
+	trigger := "manual"
+	outcome := "Outbound Call"
+	if customGreeting != "" {
+		dir = "auto-callback"
+		trigger = "autonomous_callback"
+		outcome = "Auto-Callback In Progress"
+	}
+	peerNum := formatPhoneNumber(peer.User)
+	now := time.Now().UnixMilli()
+	s.mgr.broker.upsertCall(CallRecord{
+		SessionID: s.id, CallID: callID, Direction: dir, Peer: peer.String(), PeerNumber: peerNum,
+		StartedAt: now, Status: StatusStarting, TriggerReason: trigger, Outcome: outcome,
+		Events: []CallEventLog{{
+			Timestamp: now,
+			Type:      "start",
+			Message:   fmt.Sprintf("Dialing %s (%s)", peerNum, dir),
+			Details:   customGreeting,
+		}},
+	})
 	if err := cm.StartCall(ctx, callID, peer, isVideo); err != nil {
 		s.removeCall(callID)
+		s.mgr.broker.recordCallEvent(callID, "error", "Failed to start call: "+err.Error(), "")
+		s.mgr.broker.endCall(callID, "start_error")
 		return "", err
 	}
 	return callID, nil
@@ -220,6 +278,8 @@ func (s *Session) onIncomingOffer(ctx context.Context, evt *events.CallOffer) {
 	if ac, ok := s.reg.get(callID); ok {
 		ac.callbackJID = callbackJID
 	}
+	peerNum := formatPhoneNumber(callbackJID.User)
+	s.mgr.broker.recordCallEvent(callID, "offer_received", "Inbound WhatsApp call offer received from "+peerNum, fmt.Sprintf("From: %s", evt.From.String()))
 	cm.HandleCallOffer(ctx, node, evt.From)
 
 	if s.mgr.agentConfig != nil && s.mgr.agentConfig.IsAutoAnswer() {
@@ -227,12 +287,15 @@ func (s *Session) onIncomingOffer(ctx context.Context, evt *events.CallOffer) {
 		go func() {
 			// Pre-synthesize the greeting during the ring delay so it plays instantly on connect
 			if ac, ok := s.reg.get(callID); ok && ac.agent != nil {
+				s.mgr.broker.recordCallEvent(callID, "agent_prewarm", "AI Voice Agent pre-synthesizing greeting audio", "")
 				ac.agent.PrewarmGreeting()
 			}
 			time.Sleep(1200 * time.Millisecond)
+			s.mgr.broker.recordCallEvent(callID, "accepting", "Accepting incoming call with AI Agent", "")
 			s.mgr.broker.emitIncomingClaimed(s.id, callID, "ai-agent")
 			if err := cm.AcceptCall(context.Background(), callID); err != nil {
 				s.log.Error("failed to auto-answer incoming call", "call_id", callID, "err", err)
+				s.mgr.broker.recordCallEvent(callID, "accept_error", "Failed to answer call: "+err.Error(), "")
 			}
 		}()
 	}
