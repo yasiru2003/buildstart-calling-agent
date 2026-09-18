@@ -167,16 +167,12 @@ func (c *OpenRouterClient) ChatWithAudio(ctx context.Context, wavData []byte) (t
 		return "", "", err
 	}
 
-	// Clean code fence blocks if any
+	// Clean code fence blocks or surrounding text if any
 	clean := strings.TrimSpace(rawText)
-	if strings.HasPrefix(clean, "```json") {
-		clean = strings.TrimPrefix(clean, "```json")
-		clean = strings.TrimSuffix(clean, "```")
-		clean = strings.TrimSpace(clean)
-	} else if strings.HasPrefix(clean, "```") {
-		clean = strings.TrimPrefix(clean, "```")
-		clean = strings.TrimSuffix(clean, "```")
-		clean = strings.TrimSpace(clean)
+	firstBrace := strings.Index(clean, "{")
+	lastBrace := strings.LastIndex(clean, "}")
+	if firstBrace != -1 && lastBrace > firstBrace {
+		clean = clean[firstBrace : lastBrace+1]
 	}
 
 	var parsed AudioTurnResult
@@ -184,7 +180,7 @@ func (c *OpenRouterClient) ChatWithAudio(ctx context.Context, wavData []byte) (t
 		transcription = strings.TrimSpace(parsed.Transcription)
 		reply = strings.TrimSpace(parsed.Reply)
 	} else {
-		reply = clean
+		reply = rawText
 	}
 
 	c.mu.Lock()

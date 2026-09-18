@@ -10,10 +10,11 @@ import (
 )
 
 type activeCall struct {
-	cm          *call.CallManager
-	bridge      *Bridge
-	agent       *agent.AIAgent
-	callbackJID types.JID
+	cm                *call.CallManager
+	bridge            *Bridge
+	agent             *agent.AIAgent
+	callbackJID       types.JID
+	peerAudioReceived bool
 }
 
 type callRegistry struct {

@@ -1,12 +1,12 @@
 import { useState } from "react";
-import { 
-  PhoneIncoming, 
-  PhoneOutgoing, 
-  Zap, 
-  Clock, 
-  MessageSquare, 
-  ChevronRight, 
-  FileText, 
+import {
+  PhoneIncoming,
+  PhoneOutgoing,
+  Zap,
+  Clock,
+  MessageSquare,
+  ChevronRight,
+  FileText,
   RotateCcw,
   Sparkles
 } from "lucide-react";
@@ -47,33 +47,29 @@ export const RecentCallsSection = ({ sid }: { sid: string }) => {
           <div className="flex bg-muted p-0.5 rounded-lg text-xs">
             <button
               onClick={() => setFilter("all")}
-              className={`px-2.5 py-1 rounded-md transition-colors ${
-                filter === "all" ? "bg-background text-foreground shadow-xs font-medium" : "text-muted-foreground hover:text-foreground"
-              }`}
+              className={`px-2.5 py-1 rounded-md transition-colors ${filter === "all" ? "bg-background text-foreground shadow-xs font-medium" : "text-muted-foreground hover:text-foreground"
+                }`}
             >
               All
             </button>
             <button
               onClick={() => setFilter("callback")}
-              className={`px-2.5 py-1 rounded-md transition-colors flex items-center gap-1 ${
-                filter === "callback" ? "bg-background text-amber-600 dark:text-amber-400 shadow-xs font-medium" : "text-muted-foreground hover:text-foreground"
-              }`}
+              className={`px-2.5 py-1 rounded-md transition-colors flex items-center gap-1 ${filter === "callback" ? "bg-background text-amber-600 dark:text-amber-400 shadow-xs font-medium" : "text-muted-foreground hover:text-foreground"
+                }`}
             >
               <Zap className="h-3 w-3" /> Auto-Callback
             </button>
             <button
               onClick={() => setFilter("inbound")}
-              className={`px-2.5 py-1 rounded-md transition-colors ${
-                filter === "inbound" ? "bg-background text-blue-600 dark:text-blue-400 shadow-xs font-medium" : "text-muted-foreground hover:text-foreground"
-              }`}
+              className={`px-2.5 py-1 rounded-md transition-colors ${filter === "inbound" ? "bg-background text-blue-600 dark:text-blue-400 shadow-xs font-medium" : "text-muted-foreground hover:text-foreground"
+                }`}
             >
               Inbound
             </button>
             <button
               onClick={() => setFilter("outbound")}
-              className={`px-2.5 py-1 rounded-md transition-colors ${
-                filter === "outbound" ? "bg-background text-emerald-600 dark:text-emerald-400 shadow-xs font-medium" : "text-muted-foreground hover:text-foreground"
-              }`}
+              className={`px-2.5 py-1 rounded-md transition-colors ${filter === "outbound" ? "bg-background text-emerald-600 dark:text-emerald-400 shadow-xs font-medium" : "text-muted-foreground hover:text-foreground"
+                }`}
             >
               Outbound
             </button>
@@ -107,7 +103,8 @@ export const RecentCallsSection = ({ sid }: { sid: string }) => {
               const durSec = call.durationSeconds ?? (call.endedAt && call.startedAt ? Math.round((call.endedAt - call.startedAt) / 1000) : 0);
               const displayName = call.peerNumber || call.peer;
               const hasTranscripts = call.transcripts && call.transcripts.length > 0;
-              const lastTranscript = hasTranscripts ? call.transcripts![call.transcripts!.length - 1] : null;
+              const latestCaller = call.transcripts ? [...call.transcripts].reverse().find(t => t.role === "user") : null;
+              const latestAI = call.transcripts ? [...call.transcripts].reverse().find(t => t.role === "agent" || t.role === "assistant") : null;
 
               return (
                 <div
@@ -155,12 +152,23 @@ export const RecentCallsSection = ({ sid }: { sid: string }) => {
                       </div>
 
                       {/* Snippet / Transcript Preview */}
-                      {lastTranscript ? (
-                        <p className="text-xs text-muted-foreground mt-1 truncate max-w-md flex items-center gap-1.5">
-                          <MessageSquare className="h-3 w-3 shrink-0 text-primary" />
-                          <span className="font-medium text-foreground/80">{lastTranscript.role === "agent" ? "AI:" : "Caller:"}</span>
-                          <span>"{lastTranscript.text}"</span>
-                        </p>
+                      {hasTranscripts ? (
+                        <div className="mt-1 space-y-0.5 max-w-md">
+                          {latestCaller && (
+                            <p className="text-xs text-foreground font-medium truncate flex items-center gap-1.5">
+                              <MessageSquare className="h-3 w-3 shrink-0 text-primary" />
+                              <span className="font-semibold text-primary">Caller:</span>
+                              <span className="truncate">"{latestCaller.text}"</span>
+                            </p>
+                          )}
+                          {latestAI && (
+                            <p className="text-xs text-muted-foreground truncate flex items-center gap-1.5">
+                              {!latestCaller && <MessageSquare className="h-3 w-3 shrink-0 text-primary/70" />}
+                              <span className="font-medium text-muted-foreground/90">AI:</span>
+                              <span className="truncate">"{latestAI.text}"</span>
+                            </p>
+                          )}
+                        </div>
                       ) : (
                         <p className="text-xs text-muted-foreground mt-0.5">
                           {call.endReason ? `Status: ${call.endReason}` : "Call logged"}

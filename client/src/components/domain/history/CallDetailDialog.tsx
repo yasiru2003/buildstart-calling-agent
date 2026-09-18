@@ -156,7 +156,7 @@ export const CallDetailDialog = ({ call, open, onOpenChange }: CallDetailDialogP
               ) : (
                 <div className="space-y-3">
                   {call.transcripts.map((t, idx) => {
-                    const isAgent = t.role === "agent";
+                    const isAgent = t.role === "agent" || t.role === "assistant";
                     return (
                       <div
                         key={idx}

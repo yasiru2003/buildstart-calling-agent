@@ -7,7 +7,7 @@ export type CallEventLog = {
 
 export type CallTranscriptItem = {
   timestamp: number;
-  role: "caller" | "agent";
+  role: "caller" | "agent" | "assistant" | "user" | string;
   text: string;
 };
 

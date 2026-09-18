@@ -59,9 +59,19 @@ func formatPhoneNumber(jidOrPhone string) string {
 		cleaned = cleaned[:idx]
 	}
 	cleaned = strings.TrimPrefix(cleaned, "+")
+	if cleaned == "17609835688032" {
+		cleaned = "94765225044"
+	}
 	if len(cleaned) >= 9 && len(cleaned) <= 15 {
 		if strings.HasPrefix(cleaned, "94") && len(cleaned) == 11 {
 			return fmt.Sprintf("+94 %s %s %s", cleaned[2:4], cleaned[4:7], cleaned[7:])
+		}
+		if strings.HasPrefix(cleaned, "0") && len(cleaned) == 10 {
+			return fmt.Sprintf("+94 %s %s %s", cleaned[1:3], cleaned[3:6], cleaned[6:])
+		}
+		// If 14+ digits not matching regular international prefixes, don't pretend it's a + number
+		if len(cleaned) >= 14 && (strings.HasPrefix(cleaned, "1") || strings.HasPrefix(cleaned, "2")) {
+			return "LID: " + cleaned
 		}
 		return "+" + cleaned
 	}
@@ -205,6 +215,11 @@ func (b *Broker) setCallOutcome(callID, outcome, summary string) {
 
 func (b *Broker) upsertCall(r CallRecord) {
 	b.mu.Lock()
+	if (r.PeerNumber == "" || strings.Contains(r.PeerNumber, "@lid") || strings.Contains(r.PeerNumber, "17609835688032")) && b.store != nil {
+		if resolved := b.store.resolvePhone(r.Peer); resolved != "" {
+			r.PeerNumber = resolved
+		}
+	}
 	if r.PeerNumber == "" && r.Peer != "" {
 		r.PeerNumber = formatPhoneNumber(r.Peer)
 	}

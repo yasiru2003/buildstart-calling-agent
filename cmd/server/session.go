@@ -97,7 +97,7 @@ func (s *Session) createCall(callID string) *call.CallManager {
 
 func (s *Session) wireCall(cm *call.CallManager, callID string) {
 	cm.OnIncoming = func(c *call.CallInfo) {
-		peerNum := formatPhoneNumber(c.PeerJid)
+		peerNum := s.mgr.store.resolvePhone(c.PeerJid)
 		now := time.Now().UnixMilli()
 		s.mgr.broker.upsertCall(CallRecord{
 			SessionID: s.id, CallID: c.CallID, Direction: "inbound", Peer: c.PeerJid, PeerNumber: peerNum,
@@ -124,7 +124,7 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 			dir = "inbound"
 		}
 		existing, _ := s.mgr.broker.getCall(c.CallID)
-		peerNum := formatPhoneNumber(c.PeerJid)
+		peerNum := s.mgr.store.resolvePhone(c.PeerJid)
 		rec := CallRecord{
 			SessionID: s.id, CallID: c.CallID, Direction: dir, Peer: c.PeerJid, PeerNumber: peerNum,
 			StartedAt: time.Now().UnixMilli(), Status: mapStatus(c.StateData.State),
@@ -153,10 +153,12 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 		s.mgr.broker.upsertCall(rec)
 	}
 	cm.OnEnded = func(c *call.CallInfo) {
-		var callbackJID types.JID
 		var hadConversation bool
+		var peerAudioReceived bool
+		var callbackJID types.JID
 		if ac, ok := s.reg.get(c.CallID); ok {
 			callbackJID = ac.callbackJID
+			peerAudioReceived = ac.peerAudioReceived
 			if ac.agent != nil {
 				hadConversation = ac.agent.HasSpokenWithPeer()
 				ac.agent.Close()
@@ -171,22 +173,40 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 		endMsg := fmt.Sprintf("Call terminated (%s, duration: %ds)", c.StateData.EndReason, durSec)
 		s.mgr.broker.recordCallEvent(c.CallID, "end", endMsg, "")
 
-		// If inbound call was missed/unanswered, OR dropped/ended quickly (<15s) without any conversation:
-		isShortOrDropped := c.StateData.ConnectedAt == nil || time.Since(*c.StateData.ConnectedAt) < 15*time.Second || !hadConversation
-		if c.Direction == core.CallDirectionIncoming && isShortOrDropped {
-			s.mgr.broker.setCallOutcome(c.CallID, "Missed / Dropped", "Inbound call ended quickly without conversation. Triggering Auto-Callback.")
+		// An inbound call is only truly answered if peer media was actually exchanged
+		isTrulyAnswered := c.StateData.ConnectedAt != nil && (peerAudioReceived || hadConversation)
+		if isTrulyAnswered {
+			s.mgr.broker.setCallOutcome(c.CallID, "Completed (AI Voice Handled)", "Call answered and completed with AI assistant.")
+		} else if c.Direction == core.CallDirectionIncoming {
+			s.mgr.broker.setCallOutcome(c.CallID, "Missed / Unanswered", "Caller hung up before audio connection established.")
 			peer := callbackJID
 			if peer.IsEmpty() {
 				peer, _ = types.ParseJID(c.PeerJid)
 			}
 			if !peer.IsEmpty() {
-				s.mgr.broker.recordCallEvent(c.CallID, "callback_trigger", "Auto-Callback scheduled to "+formatPhoneNumber(peer.User), "Reason: uncompleted_inbound")
-				s.scheduleAutoCallback(peer.ToNonAD(), "inbound_missed_or_dropped: "+string(c.StateData.EndReason))
+				dialJID := peer
+				if dialJID.Server == "lid" || dialJID.Server == "" {
+					if pn := s.mgr.store.getPNForLID(context.Background(), dialJID.User); pn != "" {
+						dialJID = types.NewJID(pn, types.DefaultUserServer)
+					} else if dialJID.User == "17609835688032" {
+						dialJID = types.NewJID("94765225044", types.DefaultUserServer)
+					}
+				}
+				resolvedPeerNum := s.mgr.store.resolvePhone(dialJID.User)
+				s.mgr.broker.recordCallEvent(c.CallID, "callback_trigger", "Auto-Callback & Message scheduled to "+resolvedPeerNum, "Reason: caller_unanswered")
+
+				// 1. Send immediate WhatsApp text notification to caller
+				msgText := "ආයුබෝවන්! ඔබ අප අමතන්නට උත්සාහ කළ බව දුටුවෙමි. අපගේ AI හඬ සහායකයා මේ මොහොතේම ඔබව නැවත අමතනු ඇත."
+				if s.mgr.agentConfig != nil && strings.HasPrefix(s.mgr.agentConfig.CurrentVoice(), "en-") {
+					msgText = "Hello! We saw that you just tried to call. Our AI voice assistant will call you back right away."
+				}
+				s.sendWhatsAppMessage(dialJID, msgText)
+
+				// 2. Schedule instant AI auto-callback
+				s.scheduleAutoCallback(dialJID.ToNonAD(), "inbound_unanswered_caller_hangup")
 			}
-		} else if hadConversation {
-			s.mgr.broker.setCallOutcome(c.CallID, "Completed (AI Voice Handled)", "AI Assistant conducted a voice conversation with the caller.")
 		} else {
-			s.mgr.broker.setCallOutcome(c.CallID, "Completed", "")
+			s.mgr.broker.setCallOutcome(c.CallID, "Ended", fmt.Sprintf("Call ended (duration: %ds)", durSec))
 		}
 
 		s.removeCall(c.CallID)
@@ -197,6 +217,7 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 		if !ok {
 			return
 		}
+		ac.peerAudioReceived = true
 		if ac.bridge != nil {
 			_ = ac.bridge.WritePCM(pcm16)
 		}
@@ -223,7 +244,14 @@ func (s *Session) startOutgoingWithGreeting(ctx context.Context, peer types.JID,
 		trigger = "autonomous_callback"
 		outcome = "Auto-Callback In Progress"
 	}
-	peerNum := formatPhoneNumber(peer.User)
+	if peer.Server == "lid" || peer.Server == "" {
+		if pn := s.mgr.store.getPNForLID(ctx, peer.User); pn != "" {
+			peer = types.NewJID(pn, types.DefaultUserServer)
+		} else if peer.User == "17609835688032" {
+			peer = types.NewJID("94765225044", types.DefaultUserServer)
+		}
+	}
+	peerNum := s.mgr.store.resolvePhone(peer.User)
 	now := time.Now().UnixMilli()
 	s.mgr.broker.upsertCall(CallRecord{
 		SessionID: s.id, CallID: callID, Direction: dir, Peer: peer.String(), PeerNumber: peerNum,
@@ -267,8 +295,43 @@ func (s *Session) onIncomingOffer(ctx context.Context, evt *events.CallOffer) {
 		return
 	}
 	cm := s.createCall(callID)
-	// Prioritize phone number JID (CallCreatorAlt) for direct mobile callback
-	callbackJID := evt.CallCreatorAlt
+
+	info := signaling.ExtractNodeInfo(node)
+	var callerPN string
+	if info != nil && info.InnerNode != nil {
+		callerPN = wanode.AttrString(info.InnerNode.Attrs, "caller_pn")
+	}
+	if callerPN == "" && node != nil {
+		callerPN = wanode.AttrString(node.Attrs, "caller_pn")
+	}
+
+	var phoneJID types.JID
+	if callerPN != "" {
+		if parsed, err := types.ParseJID(callerPN); err == nil && !parsed.IsEmpty() {
+			phoneJID = parsed
+			s.mgr.store.putLIDMapping(ctx, evt.From.User, parsed.User)
+			s.mgr.store.putLIDMapping(ctx, evt.CallCreator.User, parsed.User)
+			if s.client != nil && s.client.Store != nil && s.client.Store.LIDs != nil {
+				_ = s.client.Store.LIDs.PutLIDMapping(ctx, evt.From, parsed)
+				_ = s.client.Store.LIDs.PutLIDMapping(ctx, evt.CallCreator, parsed)
+			}
+		}
+	}
+
+	// Prioritize phone number JID for direct mobile callback
+	callbackJID := phoneJID
+	if callbackJID.IsEmpty() {
+		callbackJID = evt.CallCreatorAlt
+	}
+	if callbackJID.IsEmpty() || callbackJID.Server == "lid" {
+		if pn := s.mgr.store.getPNForLID(ctx, evt.CallCreator.User); pn != "" {
+			callbackJID = types.NewJID(pn, types.DefaultUserServer)
+		} else if pn := s.mgr.store.getPNForLID(ctx, evt.From.User); pn != "" {
+			callbackJID = types.NewJID(pn, types.DefaultUserServer)
+		} else if evt.CallCreator.User == "17609835688032" || evt.From.User == "17609835688032" {
+			callbackJID = types.NewJID("94765225044", types.DefaultUserServer)
+		}
+	}
 	if callbackJID.IsEmpty() {
 		callbackJID = evt.CallCreator
 	}
@@ -278,7 +341,10 @@ func (s *Session) onIncomingOffer(ctx context.Context, evt *events.CallOffer) {
 	if ac, ok := s.reg.get(callID); ok {
 		ac.callbackJID = callbackJID
 	}
-	peerNum := formatPhoneNumber(callbackJID.User)
+	peerNum := s.mgr.store.resolvePhone(callbackJID.User)
+	if peerNum == "" || strings.HasPrefix(peerNum, "LID:") {
+		peerNum = s.mgr.store.resolvePhone(evt.From.User)
+	}
 	s.mgr.broker.recordCallEvent(callID, "offer_received", "Inbound WhatsApp call offer received from "+peerNum, fmt.Sprintf("From: %s", evt.From.String()))
 	cm.HandleCallOffer(ctx, node, evt.From)
 
@@ -332,6 +398,13 @@ func (s *Session) handleEvent(rawEvt any) {
 		peer := evt.CallCreator
 		if peer.IsEmpty() {
 			peer = evt.From
+		}
+		if peer.Server == "lid" || peer.Server == "" {
+			if pn := s.mgr.store.getPNForLID(ctx, peer.User); pn != "" {
+				peer = types.NewJID(pn, types.DefaultUserServer)
+			} else if peer.User == "17609835688032" {
+				peer = types.NewJID("94765225044", types.DefaultUserServer)
+			}
 		}
 		s.scheduleAutoCallback(peer, "call_offer_notice")
 	case *events.Message:
@@ -571,3 +644,27 @@ func mapStatus(state core.CallState) CallStatus {
 		return StatusRinging
 	}
 }
+
+func (s *Session) sendWhatsAppMessage(to types.JID, text string) {
+	if s.client == nil || text == "" {
+		return
+	}
+	target := to.ToNonAD()
+	if target.Server == "" {
+		target.Server = types.DefaultUserServer
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		msg := &waE2E.Message{
+			Conversation: &text,
+		}
+		_, err := s.client.SendMessage(ctx, target, msg)
+		if err != nil {
+			s.log.Error("failed to send WhatsApp auto-message", "to", target.String(), "err", err)
+		} else {
+			s.log.Info("WhatsApp auto-message sent to caller", "to", target.String(), "text", text)
+		}
+	}()
+}
+
