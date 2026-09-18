@@ -74,3 +74,14 @@ func (r *callRegistry) drain() []*activeCall {
 	r.calls = map[string]*activeCall{}
 	return out
 }
+
+func (r *callRegistry) all() []*activeCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]*activeCall, 0, len(r.calls))
+	for _, ac := range r.calls {
+		out = append(out, ac)
+	}
+	return out
+}
+

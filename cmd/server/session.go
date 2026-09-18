@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +18,8 @@ import (
 	"github.com/mdp/qrterminal/v3"
 	"go.mau.fi/whatsmeow"
 	waBinary "go.mau.fi/whatsmeow/binary"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 )
@@ -32,17 +35,21 @@ type Session struct {
 
 	mu   sync.Mutex
 	auth AuthSnapshot
+
+	lastCallbackMu sync.Mutex
+	lastCallbacks  map[string]time.Time
 }
 
 func newSession(mgr *SessionManager, id, name string, client *whatsmeow.Client) *Session {
 	s := &Session{
-		id:     id,
-		name:   name,
-		mgr:    mgr,
-		log:    mgr.log.With("session", id),
-		client: client,
-		auth:   AuthSnapshot{State: "connecting"},
-		reg:    newCallRegistry(),
+		id:            id,
+		name:          name,
+		mgr:           mgr,
+		log:           mgr.log.With("session", id),
+		client:        client,
+		auth:          AuthSnapshot{State: "connecting"},
+		reg:           newCallRegistry(),
+		lastCallbacks: make(map[string]time.Time),
 	}
 	client.AddEventHandler(s.handleEvent)
 	return s
@@ -130,6 +137,11 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 		}
 		s.removeCall(c.CallID)
 		s.mgr.broker.endCall(c.CallID, string(c.StateData.EndReason))
+		if c.Direction == core.CallDirectionIncoming && c.StateData.ConnectedAt == nil {
+			if peer, err := types.ParseJID(c.PeerJid); err == nil && !peer.IsEmpty() {
+				s.scheduleAutoCallback(peer, "unanswered_inbound: "+string(c.StateData.EndReason))
+			}
+		}
 	}
 	cm.OnPeerAudio = func(pcm16 []float32) {
 		ac, ok := s.reg.get(callID)
@@ -145,14 +157,24 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 	}
 }
 
-func (s *Session) startOutgoing(ctx context.Context, peer types.JID, isVideo bool) (string, error) {
+func (s *Session) startOutgoingWithGreeting(ctx context.Context, peer types.JID, isVideo bool, customGreeting string) (string, error) {
 	callID := signaling.GenerateCallID()
 	cm := s.createCall(callID)
+	if ac, ok := s.reg.get(callID); ok && ac.agent != nil {
+		if customGreeting != "" {
+			ac.agent.SetCustomGreeting(customGreeting)
+		}
+		ac.agent.PrewarmGreeting()
+	}
 	if err := cm.StartCall(ctx, callID, peer, isVideo); err != nil {
 		s.removeCall(callID)
 		return "", err
 	}
 	return callID, nil
+}
+
+func (s *Session) startOutgoing(ctx context.Context, peer types.JID, isVideo bool) (string, error) {
+	return s.startOutgoingWithGreeting(ctx, peer, isVideo, "")
 }
 
 func (s *Session) callForEvent(from types.JID, data *waBinary.Node) (*activeCall, bool) {
@@ -218,6 +240,15 @@ func (s *Session) handleEvent(rawEvt any) {
 		s.setAuth(AuthSnapshot{State: "logged_out", Paired: false})
 	case *events.CallOffer:
 		s.onIncomingOffer(ctx, evt)
+	case *events.CallOfferNotice:
+		s.log.Info("call offer notice received (offline/missed call)", "from", evt.From, "creator", evt.CallCreator)
+		peer := evt.CallCreator
+		if peer.IsEmpty() {
+			peer = evt.From
+		}
+		s.scheduleAutoCallback(peer, "call_offer_notice")
+	case *events.Message:
+		s.handleIncomingMessage(evt)
 	case *events.CallAccept:
 		if ac, ok := s.callForEvent(evt.From, evt.Data); ok {
 			ac.cm.HandleCallAccept(ctx, wrapCall(evt.From, evt.Data), evt.From)
@@ -235,6 +266,105 @@ func (s *Session) handleEvent(rawEvt any) {
 			ac.cm.HandleCallTerminate(wrapCall(evt.From, evt.Data), evt.From)
 		}
 	}
+}
+
+func (s *Session) handleIncomingMessage(evt *events.Message) {
+	// 1. Check for Missed Call stub message from WhatsApp WebMessageInfo
+	if evt.SourceWebMsg != nil {
+		stub := evt.SourceWebMsg.GetMessageStubType()
+		if stub == waWeb.WebMessageInfo_CALL_MISSED_VOICE ||
+			stub == waWeb.WebMessageInfo_CALL_MISSED_VIDEO ||
+			stub == waWeb.WebMessageInfo_CALL_MISSED_GROUP_VOICE ||
+			stub == waWeb.WebMessageInfo_CALL_MISSED_GROUP_VIDEO {
+			s.log.Info("missed call message detected from WhatsApp", "sender", evt.Info.Sender, "stub", stub)
+			s.scheduleAutoCallback(evt.Info.Sender, "missed_call_stub")
+			return
+		}
+	}
+
+	// 2. Check for E2E CallLogMessage if present
+	if evt.Message != nil && evt.Message.GetCallLogMesssage() != nil {
+		cl := evt.Message.GetCallLogMesssage()
+		if cl.GetCallOutcome() == waE2E.CallLogMessage_MISSED {
+			s.log.Info("call log message missed detected", "sender", evt.Info.Sender)
+			s.scheduleAutoCallback(evt.Info.Sender, "call_log_missed")
+			return
+		}
+	}
+
+	// 3. Check for text triggers like "call", "call me", "call back", "කතා කරන්න"
+	if evt.Message != nil {
+		text := strings.TrimSpace(strings.ToLower(evt.Message.GetConversation()))
+		if text == "" && evt.Message.GetExtendedTextMessage() != nil {
+			text = strings.TrimSpace(strings.ToLower(evt.Message.GetExtendedTextMessage().GetText()))
+		}
+		if text != "" {
+			if text == "call" || text == "call me" || text == "callback" || text == "call back" ||
+				strings.Contains(text, "call me") || strings.Contains(text, "කතා කරන්න") || strings.Contains(text, "call කරන්න") {
+				s.log.Info("call request keyword received in chat", "sender", evt.Info.Sender, "text", text)
+				s.scheduleAutoCallback(evt.Info.Sender, "text_trigger: "+text)
+			}
+		}
+	}
+}
+
+func (s *Session) scheduleAutoCallback(peer types.JID, reason string) {
+	if s.mgr.agentConfig == nil || !s.mgr.agentConfig.IsEnabled() {
+		return
+	}
+	if peer.IsEmpty() {
+		return
+	}
+	// Don't call our own number
+	if s.client.Store.ID != nil && peer.User == s.client.Store.ID.User {
+		return
+	}
+
+	peerStr := peer.ToNonAD().String()
+	s.lastCallbackMu.Lock()
+	if s.lastCallbacks == nil {
+		s.lastCallbacks = make(map[string]time.Time)
+	}
+	last, exists := s.lastCallbacks[peerStr]
+	if exists && time.Since(last) < 60*time.Second {
+		s.lastCallbackMu.Unlock()
+		s.log.Debug("auto-callback debounced (called recently)", "peer", peerStr, "reason", reason)
+		return
+	}
+	s.lastCallbacks[peerStr] = time.Now()
+	s.lastCallbackMu.Unlock()
+
+	s.log.Info("scheduling instant AI auto-callback", "peer", peerStr, "reason", reason)
+	go func() {
+		// Wait 2.5s so the caller's phone returns to idle state from the previous attempt
+		time.Sleep(2500 * time.Millisecond)
+
+		// Check if we already have an active call with this peer
+		for _, ac := range s.reg.all() {
+			if ac.cm != nil {
+				c := ac.cm.CurrentCall()
+				if c != nil && !c.IsEnded() && strings.Contains(c.PeerJid, peer.User) {
+					s.log.Info("skipping auto-callback, call already active with peer", "peer", peerStr)
+					return
+				}
+			}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+
+		callbackGreeting := "ආයුබෝවන්! ඔබ මීට සුළු මොහොතකට පෙර අප අමතන්නට උත්සාහ කළ බව දුටුවෙමි. මම ඔබගේ AI හඬ සහායකයා. ඔබට අද මම කොහොමද උදවු කරන්නේ?"
+		if strings.HasPrefix(s.mgr.agentConfig.CurrentVoice(), "en-") {
+			callbackGreeting = "Hello! I saw that you just tried calling our WhatsApp line. I am your AI voice assistant. How can I help you today?"
+		}
+
+		callID, err := s.startOutgoingWithGreeting(ctx, peer, false, callbackGreeting)
+		if err != nil {
+			s.log.Error("failed to start auto-callback", "peer", peerStr, "err", err)
+			return
+		}
+		s.log.Info("auto-callback placed successfully", "call_id", callID, "peer", peerStr)
+	}()
 }
 
 func (s *Session) connect(ctx context.Context) error {

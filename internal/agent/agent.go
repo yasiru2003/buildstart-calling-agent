@@ -40,8 +40,9 @@ type AIAgent struct {
 	speechLock sync.Mutex
 
 	// Pre-synthesized greeting audio — populated during ring delay so it plays instantly
-	prewarmPCM []float32
-	prewarmMu  sync.Mutex
+	prewarmPCM     []float32
+	prewarmMu      sync.Mutex
+	customGreeting string
 
 	// Output callback to inject 16 kHz Float32 PCM back into WhatsApp CallManager
 	FeedAudio func(pcm []float32)
@@ -133,6 +134,12 @@ func (a *AIAgent) handleCallerSpeech(pcm []float32, wav []byte) {
 	a.setState(StateIdle)
 }
 
+func (a *AIAgent) SetCustomGreeting(text string) {
+	a.prewarmMu.Lock()
+	defer a.prewarmMu.Unlock()
+	a.customGreeting = text
+}
+
 // PrewarmGreeting synthesizes the greeting text in the background during the ring
 // delay so the audio is ready to play the instant the call goes active, eliminating
 // the TTS latency that would otherwise cause 2-3 seconds of silence.
@@ -144,6 +151,12 @@ func (a *AIAgent) PrewarmGreeting() {
 	if strings.HasPrefix(a.tts.GetVoice(), "en-") {
 		greeting = "Hello! I am your AI voice assistant. How can I help you today?"
 	}
+	a.prewarmMu.Lock()
+	if a.customGreeting != "" {
+		greeting = a.customGreeting
+	}
+	a.prewarmMu.Unlock()
+
 	go func() {
 		pcm, err := a.tts.Synthesize(a.ctx, greeting)
 		if err != nil || len(pcm) == 0 {
@@ -167,6 +180,11 @@ func (a *AIAgent) GreetCaller() {
 	if strings.HasPrefix(a.tts.GetVoice(), "en-") {
 		greeting = "Hello! I am your AI voice assistant. How can I help you today?"
 	}
+	a.prewarmMu.Lock()
+	if a.customGreeting != "" {
+		greeting = a.customGreeting
+	}
+	a.prewarmMu.Unlock()
 	go func() {
 		// Short safety margin to let media path fully establish
 		time.Sleep(150 * time.Millisecond)
