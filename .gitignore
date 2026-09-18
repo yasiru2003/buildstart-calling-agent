@@ -35,8 +35,7 @@ Thumbs.db
 *.swp
 *~
 !native/
-!native/*.dll
-server
+/server
 .venv/
 *.wav
 .env*

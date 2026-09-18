@@ -63,12 +63,17 @@ func NewOpenRouterClient(apiKey, model, systemPrompt string) *OpenRouterClient {
 		model:        model,
 		systemPrompt: systemPrompt,
 		temperature:  0.7,
-		maxTokens:    120, // Keep short & fast for voice telephony
+		maxTokens:    350, // Adequate tokens for Sinhala Unicode script & JSON
 		client:       &http.Client{Timeout: 20 * time.Second},
 		history:      make([]ChatMessage, 0),
 	}
 	c.Reset()
 	return c
+}
+
+type AudioTurnResult struct {
+	Transcription string `json:"transcription"`
+	Reply         string `json:"reply"`
 }
 
 func (c *OpenRouterClient) Reset() {
@@ -115,7 +120,7 @@ func (c *OpenRouterClient) Chat(ctx context.Context, userText string) (string, e
 	model := c.model
 	c.mu.Unlock()
 
-	respText, err := c.sendRequest(ctx, apiKey, model, msgs)
+	respText, err := c.sendRequest(ctx, apiKey, model, msgs, false)
 	if err != nil {
 		return "", err
 	}
@@ -133,14 +138,21 @@ func (c *OpenRouterClient) Chat(ctx context.Context, userText string) (string, e
 	return respText, nil
 }
 
-func (c *OpenRouterClient) ChatWithAudio(ctx context.Context, wavData []byte) (string, error) {
+func (c *OpenRouterClient) ChatWithAudio(ctx context.Context, wavData []byte) (transcription string, reply string, err error) {
 	b64Audio := base64.StdEncoding.EncodeToString(wavData)
+
+	audioPrompt := "Analyze the caller's spoken audio from this live WhatsApp telephone call.\n" +
+		"Return JSON only with this exact structure:\n" +
+		"{\n" +
+		"  \"transcription\": \"exact words the caller said in Sinhala or English (leave empty if unintelligible or pure silence)\",\n" +
+		"  \"reply\": \"warm, natural, spoken conversational response in colloquial Sinhala (1-2 brief sentences, no emojis, no asterisks, no bullet points)\"\n" +
+		"}"
 
 	c.mu.Lock()
 	c.history = append(c.history, ChatMessage{
 		Role: "user",
 		Content: []ContentPart{
-			{Type: "text", Text: "The caller just spoke on this live WhatsApp voice call in Sinhala (or English). Listen to their speech carefully, understand their request, and respond warmly, accurately, and naturally in 1-2 spoken conversational Sinhala sentences. Do not use asterisks, markdown, or bullet points."},
+			{Type: "text", Text: audioPrompt},
 			{Type: "input_audio", InputAudio: &InputAudioPart{Data: b64Audio, Format: "wav"}},
 		},
 	})
@@ -150,30 +162,53 @@ func (c *OpenRouterClient) ChatWithAudio(ctx context.Context, wavData []byte) (s
 	model := c.model
 	c.mu.Unlock()
 
-	respText, err := c.sendRequest(ctx, apiKey, model, msgs)
+	rawText, err := c.sendRequest(ctx, apiKey, model, msgs, true)
 	if err != nil {
-		return "", err
+		return "", "", err
+	}
+
+	// Clean code fence blocks if any
+	clean := strings.TrimSpace(rawText)
+	if strings.HasPrefix(clean, "```json") {
+		clean = strings.TrimPrefix(clean, "```json")
+		clean = strings.TrimSuffix(clean, "```")
+		clean = strings.TrimSpace(clean)
+	} else if strings.HasPrefix(clean, "```") {
+		clean = strings.TrimPrefix(clean, "```")
+		clean = strings.TrimSuffix(clean, "```")
+		clean = strings.TrimSpace(clean)
+	}
+
+	var parsed AudioTurnResult
+	if jsonErr := json.Unmarshal([]byte(clean), &parsed); jsonErr == nil && parsed.Reply != "" {
+		transcription = strings.TrimSpace(parsed.Transcription)
+		reply = strings.TrimSpace(parsed.Reply)
+	} else {
+		reply = clean
 	}
 
 	c.mu.Lock()
 	c.history = append(c.history, ChatMessage{
 		Role:    "assistant",
-		Content: respText,
+		Content: reply,
 	})
 	if len(c.history) > 15 {
 		c.history = append([]ChatMessage{c.history[0]}, c.history[len(c.history)-14:]...)
 	}
 	c.mu.Unlock()
 
-	return respText, nil
+	return transcription, reply, nil
 }
 
-func (c *OpenRouterClient) sendRequest(ctx context.Context, apiKey, model string, msgs []ChatMessage) (string, error) {
+func (c *OpenRouterClient) sendRequest(ctx context.Context, apiKey, model string, msgs []ChatMessage, jsonFormat bool) (string, error) {
 	reqBody := map[string]any{
 		"model":       model,
 		"messages":    msgs,
 		"temperature": c.temperature,
 		"max_tokens":  c.maxTokens,
+	}
+	if jsonFormat {
+		reqBody["response_format"] = map[string]string{"type": "json_object"}
 	}
 
 	payload, err := json.Marshal(reqBody)

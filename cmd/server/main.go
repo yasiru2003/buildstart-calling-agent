@@ -34,9 +34,6 @@ func main() {
 	maxCalls := flag.Int("max-calls-per-session", 8, "max concurrent calls per session (0 = unlimited)")
 
 	defaultKey := os.Getenv("OPENROUTER_API_KEY")
-	if defaultKey == "" {
-		defaultKey = "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"
-	}
 	openRouterKey := flag.String("openrouter-key", defaultKey, "OpenRouter API Key for AI Agent")
 	aiModel := flag.String("ai-model", "openrouter/auto", "AI Model identifier for OpenRouter")
 	aiPrompt := flag.String("ai-prompt", "", "Custom system prompt for the AI Voice Agent")

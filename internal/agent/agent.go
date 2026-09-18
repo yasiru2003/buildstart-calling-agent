@@ -97,13 +97,18 @@ func (a *AIAgent) handleCallerSpeech(pcm []float32, wav []byte) {
 	defer a.speechLock.Unlock()
 
 	a.setState(StateThinking)
-	a.emitTranscript("user", "🎤 [Caller speaking]")
 
-	// Step 1: OpenRouter Multimodal Voice Intelligence
-	replyText, err := a.openRouter.ChatWithAudio(a.ctx, wav)
+	// Step 1: OpenRouter Multimodal Voice Intelligence (Sinhala Audio Transcription & Conversational Reply)
+	transcription, replyText, err := a.openRouter.ChatWithAudio(a.ctx, wav)
 	if err != nil {
 		a.log.Warn("multimodal chat retry with text", "err", err)
 		replyText, err = a.openRouter.Chat(a.ctx, "The caller just finished speaking on the phone. Answer warmly in 1-2 brief spoken sentences in Sinhala.")
+	}
+
+	if strings.TrimSpace(transcription) != "" {
+		a.emitTranscript("user", transcription)
+	} else {
+		a.emitTranscript("user", "🎤 [Caller speaking]")
 	}
 
 	if err != nil || replyText == "" {
@@ -111,7 +116,7 @@ func (a *AIAgent) handleCallerSpeech(pcm []float32, wav []byte) {
 		replyText = "මම අසා සිටිමි, කරුණාකර දිගටම කතා කරන්න."
 	}
 
-	a.log.Info("AI response generated", "reply", replyText)
+	a.log.Info("AI response generated", "transcription", transcription, "reply", replyText)
 	a.emitTranscript("assistant", replyText)
 
 	// Step 2: High-Fidelity Text to Speech
