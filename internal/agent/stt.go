@@ -20,6 +20,7 @@ type STTClient interface {
 type WhisperSTT struct {
 	endpoint string
 	apiKey   string
+	language string
 	client   *http.Client
 }
 
@@ -32,6 +33,10 @@ func NewWhisperSTT(endpoint, apiKey string) *WhisperSTT {
 		apiKey:   apiKey,
 		client:   &http.Client{Timeout: 15 * time.Second},
 	}
+}
+
+func (s *WhisperSTT) SetLanguage(lang string) {
+	s.language = lang
 }
 
 func (s *WhisperSTT) Transcribe(ctx context.Context, wavData []byte) (string, error) {
@@ -51,7 +56,9 @@ func (s *WhisperSTT) Transcribe(ctx context.Context, wavData []byte) (string, er
 	}
 
 	_ = writer.WriteField("model", "whisper-1")
-	_ = writer.WriteField("language", "en")
+	if s.language != "" {
+		_ = writer.WriteField("language", s.language)
+	}
 	_ = writer.WriteField("response_format", "json")
 	if err := writer.Close(); err != nil {
 		return "", err

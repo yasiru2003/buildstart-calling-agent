@@ -25,9 +25,15 @@ type ChatMessage struct {
 }
 
 type ContentPart struct {
-	Type     string         `json:"type"`
-	Text     string         `json:"text,omitempty"`
-	ImageURL *ImageURLPart  `json:"image_url,omitempty"`
+	Type       string          `json:"type"`
+	Text       string          `json:"text,omitempty"`
+	InputAudio *InputAudioPart `json:"input_audio,omitempty"`
+	ImageURL   *ImageURLPart   `json:"image_url,omitempty"`
+}
+
+type InputAudioPart struct {
+	Data   string `json:"data"`
+	Format string `json:"format"`
 }
 
 type ImageURLPart struct {
@@ -129,14 +135,13 @@ func (c *OpenRouterClient) Chat(ctx context.Context, userText string) (string, e
 
 func (c *OpenRouterClient) ChatWithAudio(ctx context.Context, wavData []byte) (string, error) {
 	b64Audio := base64.StdEncoding.EncodeToString(wavData)
-	dataURI := "data:audio/wav;base64," + b64Audio
 
 	c.mu.Lock()
 	c.history = append(c.history, ChatMessage{
 		Role: "user",
 		Content: []ContentPart{
-			{Type: "text", Text: "The caller just spoke on the live WhatsApp voice call. Listen carefully to what they said and reply naturally like a real human in 1-2 conversational Sinhala sentences with natural fillers ('හ්ම්...', 'ආ...', 'හරි...'). No markdown, no bullet points."},
-			{Type: "image_url", ImageURL: &ImageURLPart{URL: dataURI}},
+			{Type: "text", Text: "The caller just spoke on this live WhatsApp voice call in Sinhala (or English). Listen to their speech carefully, understand their request, and respond warmly, accurately, and naturally in 1-2 spoken conversational Sinhala sentences. Do not use asterisks, markdown, or bullet points."},
+			{Type: "input_audio", InputAudio: &InputAudioPart{Data: b64Audio, Format: "wav"}},
 		},
 	})
 	msgs := make([]ChatMessage, len(c.history))
