@@ -166,7 +166,7 @@ func (t *MultiTTS) synthesizeLocal(ctx context.Context, text string) ([]float32,
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 12 * time.Second}
+	client := &http.Client{Timeout: 20 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err

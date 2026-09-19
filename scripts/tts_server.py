@@ -127,124 +127,147 @@ def synthesize_elevenlabs(text: str, voice_id: str = ELEVENLABS_VOICE_ID) -> byt
     raise RuntimeError(f"ElevenLabs error {resp.status_code}: {resp.text}")
 
 
-def synthesize_gemini_tts(text: str, voice: str = "Aoede") -> bytes:
-    """Generate human-lifelike speech directly using Google AI Studio Gemini Live Multimodal WebSocket."""
-    if not GEMINI_API_KEY:
-        raise ValueError("GEMINI_API_KEY is not configured")
+class GeminiLiveService:
+    """Persistent Google AI Studio Gemini Live Multimodal WebSocket client.
+    Keeps open WebSocket connections with pre-configured audio generation models
+    for zero-cold-start, human-lifelike native vocal synthesis.
+    """
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(target=self._run_loop, daemon=True, name="GeminiLiveLoop")
+        self.thread.start()
+        self.connections = {}  # voice_name -> {'ws': WebSocket, 'lock': asyncio.Lock()}
 
-    v_map = {
-        "gemini-aoede": "Aoede", "gemini-puck": "Puck", "gemini-charon": "Charon",
-        "gemini-kore": "Kore", "gemini-fenrir": "Fenrir",
-        "aoede": "Aoede", "puck": "Puck", "charon": "Charon",
-        "kore": "Kore", "fenrir": "Fenrir",
-    }
-    voice_name = v_map.get(voice.lower(), "Aoede")
+    def _run_loop(self):
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_forever()
 
-    # 1. Primary: Gemini Multimodal Live WebSocket (Zero Daily Quota / True AI Studio Voice)
-    async def _ws_synth():
-        import websockets
+    async def _get_connection(self, voice_name: str):
+        if voice_name not in self.connections:
+            self.connections[voice_name] = {'ws': None, 'lock': asyncio.Lock()}
+        entry = self.connections[voice_name]
+        ws = entry['ws']
+        if ws is not None and getattr(ws, 'close_code', None) is None:
+            return ws
+
         host = "generativelanguage.googleapis.com"
-        ws_url = f"wss://{host}/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key={GEMINI_API_KEY}"
-        async with websockets.connect(ws_url, close_timeout=2) as ws:
-            setup = {
-                "setup": {
-                    "model": "models/gemini-2.5-flash-native-audio-latest",
-                    "systemInstruction": {
-                        "parts": [{"text": "You are an extremely natural voice speaker. Speak the user given Sinhala text warmly, casually, and naturally like a real human on a phone call. Never explain, never say \"here is the audio\", never say \"generating audio\", never speak in English. Only speak the Sinhala words."}]
-                    },
-                    "generationConfig": {
-                        "responseModalities": ["AUDIO"],
-                        "speechConfig": {
-                            "voiceConfig": {
-                                "prebuiltVoiceConfig": {
-                                    "voiceName": voice_name
-                                }
+        ws_url = f"wss://{host}/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key={self.api_key}"
+        ws = await websockets.connect(ws_url, ping_interval=20, ping_timeout=20, close_timeout=3)
+        setup = {
+            "setup": {
+                "model": "models/gemini-2.5-flash-native-audio-latest",
+                "systemInstruction": {
+                    "parts": [{
+                        "text": "You are a warm, natural human speaking on a phone call. Your only job is to voice the exact Sinhala message provided by the user in warm colloquial Sinhala tone. Do not translate. Do not explain. Do not say any English words. Speak only the Sinhala message."
+                    }]
+                },
+                "generationConfig": {
+                    "responseModalities": ["AUDIO"],
+                    "speechConfig": {
+                        "voiceConfig": {
+                            "prebuiltVoiceConfig": {
+                                "voiceName": voice_name
                             }
-                        },
-                        "thinkingConfig": {
-                            "thinkingBudget": 0
                         }
-                    }
-                }
-            }
-            await ws.send(json.dumps(setup))
-            await asyncio.wait_for(ws.recv(), timeout=4)  # setupComplete
-
-            client_turn = {
-                "clientContent": {
-                    "turns": [{
-                        "role": "user",
-                        "parts": [{"text": f"Speak this: {text}"}]
-                    }],
-                    "turnComplete": True
-                }
-            }
-            await ws.send(json.dumps(client_turn))
-
-            raw_pcm = bytearray()
-            while True:
-                msg = await asyncio.wait_for(ws.recv(), timeout=8)
-                data = json.loads(msg)
-                server_turn = data.get("serverContent", {}).get("modelTurn", {})
-                for p in server_turn.get("parts", []):
-                    if "inlineData" in p:
-                        raw_pcm.extend(base64.b64decode(p["inlineData"]["data"]))
-                if data.get("serverContent", {}).get("turnComplete"):
-                    break
-
-            if len(raw_pcm) > 0:
-                buf = io.BytesIO()
-                with wave.open(buf, "wb") as wf:
-                    wf.setnchannels(1)
-                    wf.setsampwidth(2)
-                    wf.setframerate(24000)
-                    wf.writeframes(raw_pcm)
-                return buf.getvalue()
-            return b""
-
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            res = loop.run_until_complete(asyncio.wait_for(_ws_synth(), timeout=4.0))
-            if res and len(res) > 100:
-                return res
-        finally:
-            loop.close()
-    except Exception as ws_err:
-        print(f"⚠️ Gemini Live WS error: {ws_err}, trying REST...")
-
-    # 2. Secondary: REST Endpoint (gemini-3.1-flash-tts-preview)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-tts-preview:generateContent?key={GEMINI_API_KEY}"
-    payload = {
-        "contents": [{"parts": [{"text": text}]}],
-        "generationConfig": {
-            "responseModalities": ["AUDIO"],
-            "speechConfig": {
-                "voiceConfig": {
-                    "prebuiltVoiceConfig": {
-                        "voiceName": voice_name
+                    },
+                    "thinkingConfig": {
+                        "thinkingBudget": 0
                     }
                 }
             }
         }
-    }
-    resp = requests.post(url, json=payload, timeout=8)
-    if resp.status_code == 200:
-        res_json = resp.json()
-        candidates = res_json.get("candidates", [])
-        if candidates and "content" in candidates[0] and "parts" in candidates[0]["content"]:
-            for part in candidates[0]["content"]["parts"]:
-                if "inlineData" in part and "data" in part["inlineData"]:
-                    raw_pcm = base64.b64decode(part["inlineData"]["data"])
-                    buf = io.BytesIO()
-                    with wave.open(buf, "wb") as wf:
-                        wf.setnchannels(1)
-                        wf.setsampwidth(2)
-                        wf.setframerate(24000)
-                        wf.writeframes(raw_pcm)
-                    return buf.getvalue()
-    raise RuntimeError(f"Gemini Live error: {resp.text[:120]}")
+        await ws.send(json.dumps(setup))
+        await asyncio.wait_for(ws.recv(), timeout=6.0)
+        entry['ws'] = ws
+        print(f"✨ Gemini Live Native Audio stream connected & ready for voice '{voice_name}'")
+        return ws
+
+    async def _async_synthesize(self, text: str, voice_name: str) -> bytes:
+        if voice_name not in self.connections:
+            self.connections[voice_name] = {'ws': None, 'lock': asyncio.Lock()}
+        entry = self.connections[voice_name]
+
+        async with entry['lock']:
+            last_err = None
+            for attempt in range(2):
+                try:
+                    ws = await self._get_connection(voice_name)
+                    client_turn = {
+                        "clientContent": {
+                            "turns": [{
+                                "role": "user",
+                                "parts": [{"text": text}]
+                            }],
+                            "turnComplete": True
+                        }
+                    }
+                    await ws.send(json.dumps(client_turn))
+
+                    raw_pcm = bytearray()
+                    while True:
+                        msg = await asyncio.wait_for(ws.recv(), timeout=12.0)
+                        data = json.loads(msg)
+                        server_turn = data.get("serverContent", {}).get("modelTurn", {})
+                        for p in server_turn.get("parts", []):
+                            if "inlineData" in p:
+                                raw_pcm.extend(base64.b64decode(p["inlineData"]["data"]))
+                        if data.get("serverContent", {}).get("turnComplete"):
+                            break
+
+                    if len(raw_pcm) > 0:
+                        buf = io.BytesIO()
+                        with wave.open(buf, "wb") as wf:
+                            wf.setnchannels(1)
+                            wf.setsampwidth(2)
+                            wf.setframerate(24000)
+                            wf.writeframes(raw_pcm)
+                        return buf.getvalue()
+                    raise RuntimeError("Gemini Live sent zero audio bytes")
+                except Exception as e:
+                    last_err = e
+                    print(f"⚠️ Gemini Live attempt {attempt+1} error: {e}, refreshing connection...")
+                    if entry['ws']:
+                        try:
+                            await entry['ws'].close()
+                        except Exception:
+                            pass
+                    entry['ws'] = None
+
+            raise last_err or RuntimeError("Gemini Live synthesis failed after retries")
+
+    def prewarm(self, voice_name: str = "Aoede"):
+        """Pre-warm WebSocket connection in the background."""
+        def _warm():
+            try:
+                fut = asyncio.run_coroutine_threadsafe(self._get_connection(voice_name), self.loop)
+                fut.result(timeout=10.0)
+            except Exception as e:
+                print(f"⚠️ Gemini Live prewarm notice: {e}")
+        threading.Thread(target=_warm, daemon=True).start()
+
+    def synthesize(self, text: str, voice: str = "Aoede", timeout: float = 14.0) -> bytes:
+        v_map = {
+            "gemini-aoede": "Aoede", "gemini-puck": "Puck", "gemini-charon": "Charon",
+            "gemini-kore": "Kore", "gemini-fenrir": "Fenrir",
+            "aoede": "Aoede", "puck": "Puck", "charon": "Charon",
+            "kore": "Kore", "fenrir": "Fenrir",
+        }
+        voice_name = v_map.get(voice.lower(), "Aoede")
+        fut = asyncio.run_coroutine_threadsafe(self._async_synthesize(text, voice_name), self.loop)
+        return fut.result(timeout=timeout)
+
+
+gemini_live_service = GeminiLiveService(GEMINI_API_KEY) if GEMINI_API_KEY else None
+if gemini_live_service:
+    gemini_live_service.prewarm("Aoede")
+
+
+def synthesize_gemini_tts(text: str, voice: str = "Aoede") -> bytes:
+    """Generate human-lifelike speech directly using Google AI Studio Gemini Live Multimodal WebSocket."""
+    if not gemini_live_service:
+        raise ValueError("GEMINI_API_KEY is not configured")
+    return gemini_live_service.synthesize(text, voice=voice)
 
 
 def synthesize_edge_tts(text: str, voice: str = DEFAULT_VOICE, rate: str = RATE_MODIFIER, pitch: str = PITCH_MODIFIER) -> bytes:
