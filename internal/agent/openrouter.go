@@ -232,6 +232,7 @@ func (c *OpenRouterClient) sendRequest(ctx context.Context, apiKey, model string
 		"messages":    msgs,
 		"temperature": c.temperature,
 		"max_tokens":  c.maxTokens,
+		"reasoning":   map[string]string{"effort": "low"},
 	}
 	if jsonFormat {
 		reqBody["response_format"] = map[string]string{"type": "json_object"}
