@@ -35,7 +35,7 @@ func main() {
 
 	defaultKey := os.Getenv("OPENROUTER_API_KEY")
 	openRouterKey := flag.String("openrouter-key", defaultKey, "OpenRouter API Key for AI Agent")
-	aiModel := flag.String("ai-model", "openrouter/auto", "AI Model identifier for OpenRouter")
+	aiModel := flag.String("ai-model", "google/gemini-3.8-flash", "AI Model identifier for OpenRouter")
 	aiPrompt := flag.String("ai-prompt", "", "Custom system prompt for the AI Voice Agent")
 	aiVoice := flag.String("ai-voice", "si-LK-ThiliniNeural", "Voice model for Text-to-Speech")
 	aiAutoAnswer := flag.Bool("ai-auto-answer", true, "Automatically answer incoming WhatsApp calls with AI Agent")

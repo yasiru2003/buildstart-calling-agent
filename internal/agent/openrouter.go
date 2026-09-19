@@ -15,7 +15,7 @@ import (
 
 const (
 	DefaultOpenRouterURL   = "https://openrouter.ai/api/v1/chat/completions"
-	DefaultOpenRouterModel = "google/gemini-2.5-flash"
+	DefaultOpenRouterModel = "google/gemini-3.8-flash"
 	DefaultSystemPrompt    = `ඔබ සජීවී WhatsApp දුරකථන ඇමතුමකට පිළිතුරු දෙන මිත්‍රශීලී, කාරුණික සහ ඉතා ස්වාභාවික මිනිස් හඬ සහායකයෙකි.
 
 අතිශය වැදගත් උපදෙස්:
