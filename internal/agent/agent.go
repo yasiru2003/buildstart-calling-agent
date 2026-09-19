@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,10 +42,12 @@ type AIAgent struct {
 	speechLock sync.Mutex
 	streamMu   sync.Mutex
 
-	// Pre-synthesized greeting audio — populated during ring delay so it plays instantly
-	prewarmPCM     []float32
-	prewarmMu      sync.Mutex
-	customGreeting string
+	// Pre-synthesized greeting audio — populated during ring delay or pre-loaded so it plays instantly
+	prewarmPCM         []float32
+	prewarmMu          sync.Mutex
+	cachedGreetingPCM  []float32
+	cachedGreetingText string
+	customGreeting     string
 
 	// Output callback to inject 16 kHz Float32 PCM back into WhatsApp CallManager
 	FeedAudio func(pcm []float32)
@@ -74,6 +77,21 @@ func NewAIAgent(openRouterKey, model, systemPrompt string, log *slog.Logger) *AI
 		state:      StateIdle,
 	}
 	a.enabled.Store(true)
+
+	// Load pre-recorded Buildstart greeting if available on disk for instant 0ms greeting
+	greetingPath := "assets/sounds/greeting_buildstart.wav"
+	if data, err := os.ReadFile(greetingPath); err == nil {
+		if pcm, err := ParseWAV(data); err == nil && len(pcm) > 0 {
+			a.cachedGreetingPCM = pcm
+			a.cachedGreetingText = "හෙලෝ, ආයුබෝවන්! බිල්ඩ්ස්ටාර්ට් එකට සාදරයෙන් පිළිගන්නවා. අපි ඔයාගේ බිස්නස් එකට WhatsApp හරහා පැය විසිහතරෙම වැඩ කරන සැබෑ AI ටීම් මෙම්බර් කෙනෙක්ව හදලා දෙනවා — මේක නිකන්ම චැට්බොට් එකක් නෙවෙයි. කියන්නකො, අපේ සේවාවන් ගැන මොනවද ඔයාට දැනගන්න ඕනෙ?"
+			a.prewarmPCM = pcm
+			a.log.Info("pre-recorded Buildstart greeting loaded from disk", "path", greetingPath, "samples", len(pcm))
+		} else {
+			a.log.Warn("failed to parse pre-recorded greeting WAV", "err", err)
+		}
+	} else {
+		a.log.Warn("pre-recorded greeting file not found", "path", greetingPath, "err", err)
+	}
 
 	a.setupVAD()
 	return a
@@ -159,22 +177,43 @@ func (a *AIAgent) SetCustomGreeting(text string) {
 	a.customGreeting = text
 }
 
-// PrewarmGreeting synthesizes the greeting text in the background during the ring
-// delay so the audio is ready to play the instant the call goes active, eliminating
-// the TTS latency that would otherwise cause 2-3 seconds of silence.
+// PrewarmGreeting synthesizes or pre-loads greeting audio so it is ready to play
+// the instant the call goes active, eliminating silence.
 func (a *AIAgent) PrewarmGreeting() {
 	if !a.enabled.Load() {
 		return
 	}
-	greeting := "හෙලෝ, ආයුබෝවන්! කියන්නකො, මම කොහොමද ඔයාට උදව් කරන්න ඕනෙ?"
+	a.prewarmMu.Lock()
+	if a.customGreeting != "" {
+		greeting := a.customGreeting
+		a.prewarmMu.Unlock()
+		go func() {
+			pcm, err := a.tts.Synthesize(a.ctx, greeting)
+			if err != nil || len(pcm) == 0 {
+				a.log.Warn("prewarm custom greeting synthesis failed", "err", err)
+				return
+			}
+			a.prewarmMu.Lock()
+			a.prewarmPCM = pcm
+			a.prewarmMu.Unlock()
+			a.log.Info("custom greeting pre-synthesized and ready", "samples", len(pcm))
+		}()
+		return
+	}
+
+	// Use pre-recorded Buildstart audio if available
+	if len(a.cachedGreetingPCM) > 0 {
+		a.prewarmPCM = a.cachedGreetingPCM
+		a.prewarmMu.Unlock()
+		a.log.Info("pre-recorded Buildstart greeting ready from cache", "samples", len(a.cachedGreetingPCM))
+		return
+	}
+	a.prewarmMu.Unlock()
+
+	greeting := "හෙලෝ, ආයුබෝවන්! බිල්ඩ්ස්ටාර්ට් එකට සාදරයෙන් පිළිගන්නවා. අපි ඔයාගේ බිස්නස් එකට WhatsApp හරහා පැය විසිහතරෙම වැඩ කරන සැබෑ AI ටීම් මෙම්බර් කෙනෙක්ව හදලා දෙනවා — මේක නිකන්ම චැට්බොට් එකක් නෙවෙයි. කියන්නකො, අපේ සේවාවන් ගැන මොනවද ඔයාට දැනගන්න ඕනෙ?"
 	if strings.HasPrefix(a.tts.GetVoice(), "en-") {
 		greeting = "Hello! How can I help you today?"
 	}
-	a.prewarmMu.Lock()
-	if a.customGreeting != "" {
-		greeting = a.customGreeting
-	}
-	a.prewarmMu.Unlock()
 
 	go func() {
 		pcm, err := a.tts.Synthesize(a.ctx, greeting)
@@ -202,15 +241,20 @@ func (a *AIAgent) GreetCaller() {
 		a.speechLock.Lock()
 		defer a.speechLock.Unlock()
 
-		greeting := "හෙලෝ, ආයුබෝවන්! කියන්නකො, මම කොහොමද ඔයාට උදව් කරන්න ඕනෙ?"
+		greeting := "හෙලෝ, ආයුබෝවන්! බිල්ඩ්ස්ටාර්ට් එකට සාදරයෙන් පිළිගන්නවා. අපි ඔයාගේ බිස්නස් එකට WhatsApp හරහා පැය විසිහතරෙම වැඩ කරන සැබෑ AI ටීම් මෙම්බර් කෙනෙක්ව හදලා දෙනවා — මේක නිකන්ම චැට්බොට් එකක් නෙවෙයි. කියන්නකො, අපේ සේවාවන් ගැන මොනවද ඔයාට දැනගන්න ඕනෙ?"
 		if strings.HasPrefix(a.tts.GetVoice(), "en-") {
 			greeting = "Hello! How can I help you today?"
 		}
 		a.prewarmMu.Lock()
 		if a.customGreeting != "" {
 			greeting = a.customGreeting
+		} else if a.cachedGreetingText != "" {
+			greeting = a.cachedGreetingText
 		}
 		outPCM := a.prewarmPCM
+		if len(outPCM) == 0 && len(a.cachedGreetingPCM) > 0 && a.customGreeting == "" {
+			outPCM = a.cachedGreetingPCM
+		}
 		a.prewarmPCM = nil
 		a.prewarmMu.Unlock()
 
