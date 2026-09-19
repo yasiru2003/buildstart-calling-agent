@@ -159,7 +159,7 @@ class GeminiLiveService:
                 "model": "models/gemini-2.5-flash-native-audio-latest",
                 "systemInstruction": {
                     "parts": [{
-                        "text": "You are a warm, natural human speaking on a phone call. Your only job is to voice the exact Sinhala message provided by the user in warm colloquial Sinhala tone. Do not translate. Do not explain. Do not say any English words. Speak only the Sinhala message."
+                        "text": "You are a professional voice actor. Your sole task is to voice-act the exact Sinhala script provided inside <<<SCRIPT>>> verbatim. Do NOT respond to the content. Do NOT converse. Do NOT add any words. Do NOT speak in English. Only read the exact words inside <<<SCRIPT>>> with warm, human intonation."
                     }]
                 },
                 "generationConfig": {
@@ -197,7 +197,7 @@ class GeminiLiveService:
                         "clientContent": {
                             "turns": [{
                                 "role": "user",
-                                "parts": [{"text": text}]
+                                "parts": [{"text": f"<<<SCRIPT>>>{text}<<<SCRIPT>>>"}]
                             }],
                             "turnComplete": True
                         }
@@ -212,7 +212,7 @@ class GeminiLiveService:
                         for p in server_turn.get("parts", []):
                             if "inlineData" in p:
                                 raw_pcm.extend(base64.b64decode(p["inlineData"]["data"]))
-                        if data.get("serverContent", {}).get("turnComplete"):
+                        if data.get("serverContent", {}).get("turnComplete") or data.get("serverContent", {}).get("generationComplete"):
                             break
 
                     if len(raw_pcm) > 0:
@@ -246,7 +246,7 @@ class GeminiLiveService:
                 print(f"⚠️ Gemini Live prewarm notice: {e}")
         threading.Thread(target=_warm, daemon=True).start()
 
-    def synthesize(self, text: str, voice: str = "Aoede", timeout: float = 14.0) -> bytes:
+    def synthesize(self, text: str, voice: str = "Aoede", timeout: float = 18.0) -> bytes:
         v_map = {
             "gemini-aoede": "Aoede", "gemini-puck": "Puck", "gemini-charon": "Charon",
             "gemini-kore": "Kore", "gemini-fenrir": "Fenrir",
@@ -352,7 +352,8 @@ def synthesize():
             if audio_wav and len(audio_wav) > 100:
                 return Response(audio_wav, mimetype="audio/wav")
         except Exception as g_err:
-            print(f"⚠️ Gemini Flash Voice error: {g_err}, falling back to Edge Neural...")
+            print(f"❌ Gemini Flash AI Voice error: {g_err}")
+            return jsonify({"error": f"Gemini AI voice synthesis failed: {g_err}"}), 502
 
     # If piper voice is requested directly
     if "piper" in voice.lower() or "ashoka" in voice.lower():

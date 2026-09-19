@@ -176,27 +176,13 @@ func (a *AIAgent) handleCallerSpeech(pcm []float32, wav []byte) {
 }
 
 func (a *AIAgent) runContinuousThinkingSound(stopChan <-chan struct{}) {
-	// 1. Instantly play the first natural filler ("හ්ම්..." / "ආ හරි...")
-	a.playNextThinkingFiller()
-
-	// 2. While AI is computing, keep subtle presence alive every 2 seconds
-	ticker := time.NewTicker(2000 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-stopChan:
-			return
-		case <-a.ctx.Done():
-			return
-		case <-ticker.C:
-			select {
-			case <-stopChan:
-				return
-			default:
-				a.playNextThinkingFiller()
-			}
-		}
+	select {
+	case <-stopChan:
+		return
+	case <-a.ctx.Done():
+		return
+	default:
+		a.playNextThinkingFiller()
 	}
 }
 

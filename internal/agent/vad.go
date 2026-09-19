@@ -23,9 +23,9 @@ func DefaultVADConfig() VADConfig {
 		SampleRate:        16000,
 		EnergyThreshold:   0.016, // sensitive to normal mobile phone speaking volume
 		MinSpeechFrames:   2,     // 120ms to detect speech onset
-		SilenceDuration:   600 * time.Millisecond,
-		MaxSpeechDuration: 12 * time.Second,
-		MinSpeechSamples:  3200, // 200ms minimum speech buffer
+		SilenceDuration:   850 * time.Millisecond,
+		MaxSpeechDuration: 14 * time.Second,
+		MinSpeechSamples:  6400, // 400ms minimum speech buffer
 	}
 }
 
