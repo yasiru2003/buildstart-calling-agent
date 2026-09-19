@@ -206,7 +206,7 @@ def synthesize_gemini_tts(text: str, voice: str = "Aoede") -> bytes:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            res = loop.run_until_complete(_ws_synth())
+            res = loop.run_until_complete(asyncio.wait_for(_ws_synth(), timeout=4.0))
             if res and len(res) > 100:
                 return res
         finally:
