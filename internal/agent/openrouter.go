@@ -26,12 +26,15 @@ const (
 2. ලාංකීය කතා විලාසය හා ව්‍යාකරණ:
    - ක්‍රියා පදය වාක්‍ය අගට තබන්න (SOV): ඉංග්‍රීසි අනුකරණයෙන් 'මට පුළුවන් දැන්ම ඒක කරන්න' නොව, සැබෑ සිංහලෙන් 'මට දැන්ම ඒක කරලා දෙන්න පුළුවන්' ලෙස කතා කරන්න.
    - 'ආ හරි...', 'ඔව් අනිවාර්යයෙන්ම...', 'හරි බලමු...', 'ඒක තමයි...' වැනි ස්වාභාවික ලාංකීය කතා බහේ ආරම්භක යෙදුම් යොදන්න.
-3. අතිශය කෙටි හා සංවාදශීලී:
+3. කිසිවිටෙකත් එකම ප්‍රශ්නය නැවත නොඅසන්න (Never repeat the same question):
+   - 'මොනවද දැනගන්න ඕනෙ?' හෝ 'කොහොමද උදව් කරන්න ඕනෙ?' කියා නැවත නැවත අසන්න එපා. ඔබ දැනටමත් ඇමතුම ආරම්භයේදී එය අසා අවසන්ය.
+   - අමතන්නා යමක් ඇසූ විට හෝ පිළිතුරු දුන් විට, එයට සෘජු පිළිතුර ලබා දෙන්න, නැතහොත් ඊළඟ නිශ්චිත පියවර අසන්න (උදා: 'කවද්ද දිනය?', 'නම කොහොමද?'). සංවාදය ඉදිරියට ගෙන යන්න.
+4. අතිශය කෙටි හා සංවාදශීලී:
    - දුරකථන ඇමතුමක් බැවින් එක් වරකට සරල වාක්‍ය 1-2ක් පමණක් කියන්න. දිගු දේශනා හෝ ලැයිස්තු එපා.
    - අමතන්නාගේ ප්‍රශ්නයට සෘජුව, මිත්‍රශීලීව පිළිතුරු දෙන්න. කලින් ආයුබෝවන් කිව්වා නම් නැවත ආයුබෝවන් නොකියන්න.
-4. අංක කියවීම:
+5. අංක කියවීම:
    - දුරකථන අංක සහ මිල ගණන් අකුරෙන් ලියන්න (උදා: 'බිංදුවයි හතයි එක...', 'රුපියල් දාහක්').
-5. Formatting තහනම්:
+6. Formatting තහනම්:
    - කිසිදු markdown, තරු ලකුණු (*), bullet points හෝ emojis නොයොදන්න.`
 )
 
@@ -124,6 +127,18 @@ func (c *OpenRouterClient) SetAPIKey(key string) {
 	c.apiKey = key
 }
 
+func (c *OpenRouterClient) AddAssistantMessage(text string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.history = append(c.history, ChatMessage{
+		Role:    "assistant",
+		Content: text,
+	})
+	if len(c.history) > 15 {
+		c.history = append([]ChatMessage{c.history[0]}, c.history[len(c.history)-14:]...)
+	}
+}
+
 func (c *OpenRouterClient) Chat(ctx context.Context, userText string) (string, error) {
 	c.mu.Lock()
 	c.history = append(c.history, ChatMessage{
@@ -167,7 +182,7 @@ func (c *OpenRouterClient) ChatWithAudio(ctx context.Context, wavData []byte) (t
 		"Return JSON only with this exact structure:\n" +
 		"{\n" +
 		"  \"transcription\": \"exact words the caller said in Sinhala or English (leave empty if unintelligible or pure silence)\",\n" +
-		"  \"reply\": \"warm, natural, spoken conversational response in colloquial everyday Sinhala (1-2 brief sentences, talk like a real caring human friend on a phone, no robotic or bookish phrases, directly respond to what they asked/said, do not repeat yourself, no emojis, no asterisks, no bullet points)\"\n" +
+		"  \"reply\": \"warm, natural, spoken conversational response in colloquial everyday Sinhala (1-2 brief sentences, talk like a real caring human friend on a phone, no robotic or bookish phrases, directly respond to what they asked/said, never repeat previous questions like 'මොනවද දැනගන්න ඕනෙ' or 'කොහොමද උදව් කරන්න ඕනෙ', progress the conversation forward with the direct answer or the next logical step, no emojis, no asterisks, no bullet points)\"\n" +
 		"}"
 
 	c.mu.Lock()

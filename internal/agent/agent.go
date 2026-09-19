@@ -226,6 +226,9 @@ func (a *AIAgent) GreetCaller() {
 		}
 
 		a.emitTranscript("assistant", greeting)
+		if a.openRouter != nil {
+			a.openRouter.AddAssistantMessage(greeting)
+		}
 		a.setState(StateSpeaking)
 		a.streamAudioToCall(outPCM)
 		a.setState(StateIdle)
