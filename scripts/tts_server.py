@@ -6,6 +6,7 @@ with local Piper TTS (si_LK-sinhala-medium ONNX) as offline fallback.
 """
 
 import asyncio
+import base64
 import io
 import os
 import re
@@ -13,16 +14,19 @@ import sys
 import threading
 import wave
 import numpy as np
+import requests
 from flask import Flask, request, Response, jsonify
 
 app = Flask(__name__)
 piper_lock = threading.Lock()
 
-# 1. si-LK-ThiliniNeural (Microsoft Female Neural - warm, natural conversational voice)
-# 2. piper-ashoka / piper-intellisr (Local Human Voice by Ashoka Weerawardhana - 100% free & offline)
-# 3. si-LK-SameeraNeural (Microsoft Male Neural - standard male voice)
-DEFAULT_VOICE = os.environ.get("DEFAULT_VOICE", "si-LK-ThiliniNeural")
-RATE_MODIFIER = "+4%"  # Conversational pace (prevents slow robotic dragging)
+# Voice hierarchy:
+# 1. gemini-aoede / gemini-puck / gemini-charon (Google AI Studio Gemini Flash Native Voice - super-natural human voice)
+# 2. si-LK-ThiliniNeural (Microsoft Female Neural - warm, natural conversational voice)
+# 3. piper-ashoka (Local Human Voice by Ashoka Weerawardhana - 100% offline fallback)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+DEFAULT_VOICE = os.environ.get("DEFAULT_VOICE", "gemini-aoede")
+RATE_MODIFIER = "+4%"  # Conversational pace
 PITCH_MODIFIER = "+1Hz"
 ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
@@ -121,6 +125,50 @@ def synthesize_elevenlabs(text: str, voice_id: str = ELEVENLABS_VOICE_ID) -> byt
     raise RuntimeError(f"ElevenLabs error {resp.status_code}: {resp.text}")
 
 
+def synthesize_gemini_tts(text: str, voice: str = "Aoede") -> bytes:
+    """Generate human-lifelike speech directly using Google AI Studio Gemini Flash TTS."""
+    if not GEMINI_API_KEY:
+        raise ValueError("GEMINI_API_KEY is not configured")
+
+    v_map = {
+        "gemini-aoede": "Aoede", "gemini-puck": "Puck", "gemini-charon": "Charon",
+        "gemini-kore": "Kore", "gemini-fenrir": "Fenrir",
+        "aoede": "Aoede", "puck": "Puck", "charon": "Charon",
+        "kore": "Kore", "fenrir": "Fenrir",
+    }
+    voice_name = v_map.get(voice.lower(), "Aoede")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-tts-preview:generateContent?key={GEMINI_API_KEY}"
+    payload = {
+        "contents": [{"parts": [{"text": text}]}],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {
+                "voiceConfig": {
+                    "prebuiltVoiceConfig": {
+                        "voiceName": voice_name
+                    }
+                }
+            }
+        }
+    }
+    resp = requests.post(url, json=payload, timeout=12)
+    if resp.status_code == 200:
+        res_json = resp.json()
+        candidates = res_json.get("candidates", [])
+        if candidates and "content" in candidates[0] and "parts" in candidates[0]["content"]:
+            for part in candidates[0]["content"]["parts"]:
+                if "inlineData" in part and "data" in part["inlineData"]:
+                    raw_pcm = base64.b64decode(part["inlineData"]["data"])
+                    buf = io.BytesIO()
+                    with wave.open(buf, "wb") as wf:
+                        wf.setnchannels(1)
+                        wf.setsampwidth(2)
+                        wf.setframerate(24000)
+                        wf.writeframes(raw_pcm)
+                    return buf.getvalue()
+    raise RuntimeError(f"Gemini Flash TTS error {resp.status_code}: {resp.text[:150]}")
+
+
 def synthesize_edge_tts(text: str, voice: str = DEFAULT_VOICE, rate: str = RATE_MODIFIER, pitch: str = PITCH_MODIFIER) -> bytes:
     """Synthesize speech using Microsoft Edge Neural voices (si-LK-ThiliniNeural / si-LK-SameeraNeural)."""
     async def _synth():
@@ -172,13 +220,15 @@ def synthesize_piper(text: str, voice_key: str = "piper-intellisr") -> bytes:
 def health():
     return jsonify({
         "status": "ok",
-        "primary_engine": "microsoft-neural",
+        "primary_engine": "google-aistudio-gemini-tts" if GEMINI_API_KEY else "microsoft-neural",
         "default_voice": DEFAULT_VOICE,
         "available_voices": [
-            "si-LK-ThiliniNeural (Smooth Female Neural - Free)",
+            "gemini-aoede (Google AI Studio Super-Natural Female)",
+            "gemini-puck (Google AI Studio Super-Natural Male)",
+            "gemini-charon (Google AI Studio Super-Natural Deep Male)",
+            "si-LK-ThiliniNeural (Microsoft Female Neural - Free)",
             "si-LK-SameeraNeural (Male Neural - Free)",
-            "piper-ashoka (Ashoka Weerawardhana Human Voice - 100% Offline & Free)",
-            "piper-unicef (UNICEF Ashoka Medium Voice - 100% Offline & Free)"
+            "piper-ashoka (Ashoka Weerawardhana Human Voice - 100% Offline & Free)"
         ]
     })
 
@@ -194,6 +244,15 @@ def synthesize():
     if not text:
         return Response(b"", mimetype="audio/mpeg")
 
+    # 0. Primary: Google AI Studio Gemini Flash Native Voice (Super-Natural Human Voice)
+    if GEMINI_API_KEY and ("gemini" in voice.lower() or voice.lower() in ["aoede", "puck", "charon", "kore", "fenrir"]):
+        try:
+            audio_wav = synthesize_gemini_tts(text, voice=voice)
+            if audio_wav and len(audio_wav) > 100:
+                return Response(audio_wav, mimetype="audio/wav")
+        except Exception as g_err:
+            print(f"⚠️ Gemini Flash Voice error: {g_err}, falling back to Edge Neural...")
+
     # If piper voice is requested directly
     if "piper" in voice.lower() or "ashoka" in voice.lower():
         try:
@@ -203,9 +262,10 @@ def synthesize():
         except Exception as p_err:
             print(f"⚠️ Piper synthesis error: {p_err}, falling back to Edge Neural...")
 
-    # Primary: High-fidelity Microsoft Neural Voice (Thilini / Sameera)
+    # Secondary: High-fidelity Microsoft Neural Voice (Thilini / Sameera)
+    edge_voice = voice if "si-lk" in voice.lower() else "si-LK-ThiliniNeural"
     try:
-        audio_mp3 = synthesize_edge_tts(text, voice=voice)
+        audio_mp3 = synthesize_edge_tts(text, voice=edge_voice)
         if audio_mp3 and len(audio_mp3) > 100:
             return Response(audio_mp3, mimetype="audio/mpeg")
     except Exception as edge_err:

@@ -128,7 +128,13 @@ func (c *OpenRouterClient) Chat(ctx context.Context, userText string) (string, e
 	model := c.model
 	c.mu.Unlock()
 
-	respText, err := c.sendRequest(ctx, apiKey, model, msgs, false)
+	var respText string
+	var err error
+	if isGoogleKey(apiKey) {
+		respText, err = c.sendGoogleRequest(ctx, apiKey, model, msgs, false)
+	} else {
+		respText, err = c.sendRequest(ctx, apiKey, model, msgs, false)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -172,7 +178,12 @@ func (c *OpenRouterClient) ChatWithAudio(ctx context.Context, wavData []byte) (t
 	model := c.model
 	c.mu.Unlock()
 
-	rawText, err := c.sendRequest(ctx, apiKey, model, msgs, true)
+	var rawText string
+	if isGoogleKey(apiKey) {
+		rawText, err = c.sendGoogleAudioRequest(ctx, apiKey, model, wavData, audioPrompt)
+	} else {
+		rawText, err = c.sendRequest(ctx, apiKey, model, msgs, true)
+	}
 	if err != nil {
 		return "", "", err
 	}
@@ -280,4 +291,203 @@ func (c *OpenRouterClient) sendRequest(ctx context.Context, apiKey, model string
 	}
 
 	return strings.TrimSpace(parsed.Choices[0].Message.Content), nil
+}
+
+func isGoogleKey(key string) bool {
+	k := strings.TrimSpace(key)
+	return strings.HasPrefix(k, "AQ.") || strings.HasPrefix(k, "AIza")
+}
+
+func (c *OpenRouterClient) sendGoogleRequest(ctx context.Context, apiKey, model string, msgs []ChatMessage, jsonFormat bool) (string, error) {
+	modelName := "gemini-3.6-flash"
+	m := strings.TrimPrefix(model, "google/")
+	if strings.Contains(m, "gemini-") {
+		modelName = m
+	}
+	if modelName == "gemini-2.0-flash" || modelName == "gemini-2.5-flash" {
+		modelName = "gemini-3.6-flash"
+	}
+
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent", modelName)
+
+	type Part struct {
+		Text string `json:"text"`
+	}
+	type Content struct {
+		Role  string `json:"role"`
+		Parts []Part `json:"parts"`
+	}
+
+	var contents []Content
+	for _, m := range msgs {
+		if m.Role == "system" {
+			continue
+		}
+		role := "user"
+		if m.Role == "assistant" {
+			role = "model"
+		}
+		txt, _ := m.Content.(string)
+		if txt != "" {
+			contents = append(contents, Content{
+				Role:  role,
+				Parts: []Part{{Text: txt}},
+			})
+		}
+	}
+
+	reqBody := map[string]any{
+		"systemInstruction": map[string]any{
+			"parts": []Part{{Text: c.systemPrompt}},
+		},
+		"contents": contents,
+		"generationConfig": map[string]any{
+			"temperature":     c.temperature,
+			"maxOutputTokens": c.maxTokens,
+			"thinkingConfig": map[string]any{
+				"thinkingBudget": 0,
+			},
+		},
+	}
+	if jsonFormat {
+		reqBody["generationConfig"].(map[string]any)["responseMimeType"] = "application/json"
+	}
+
+	payload, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", err
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return "", err
+	}
+	httpReq.Header.Set("X-goog-api-key", apiKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.client.Do(httpReq)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("Google Gemini API error (%d): %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var gResp struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(bodyBytes, &gResp); err != nil {
+		return "", fmt.Errorf("failed to parse Google response: %w", err)
+	}
+	if gResp.Error != nil && gResp.Error.Message != "" {
+		return "", fmt.Errorf("Google Gemini error: %s", gResp.Error.Message)
+	}
+	if len(gResp.Candidates) == 0 || len(gResp.Candidates[0].Content.Parts) == 0 {
+		return "", fmt.Errorf("no candidates in Google response")
+	}
+
+	return strings.TrimSpace(gResp.Candidates[0].Content.Parts[0].Text), nil
+}
+
+func (c *OpenRouterClient) sendGoogleAudioRequest(ctx context.Context, apiKey, model string, wavData []byte, audioPrompt string) (string, error) {
+	modelName := "gemini-3.6-flash"
+	m := strings.TrimPrefix(model, "google/")
+	if strings.Contains(m, "gemini-") {
+		modelName = m
+	}
+	if modelName == "gemini-2.0-flash" || modelName == "gemini-2.5-flash" {
+		modelName = "gemini-3.6-flash"
+	}
+
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent", modelName)
+
+	b64Audio := base64.StdEncoding.EncodeToString(wavData)
+
+	reqBody := map[string]any{
+		"systemInstruction": map[string]any{
+			"parts": []map[string]string{{"text": c.systemPrompt}},
+		},
+		"contents": []map[string]any{
+			{
+				"parts": []any{
+					map[string]string{"text": audioPrompt},
+					map[string]any{
+						"inlineData": map[string]string{
+							"mimeType": "audio/wav",
+							"data":     b64Audio,
+						},
+					},
+				},
+			},
+		},
+		"generationConfig": map[string]any{
+			"responseMimeType": "application/json",
+			"temperature":     0.5,
+			"maxOutputTokens": 350,
+			"thinkingConfig": map[string]any{
+				"thinkingBudget": 0,
+			},
+		},
+	}
+
+	payload, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", err
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return "", err
+	}
+	httpReq.Header.Set("X-goog-api-key", apiKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.client.Do(httpReq)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("Google Gemini Audio API error (%d): %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var gResp struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+	}
+	if err := json.Unmarshal(bodyBytes, &gResp); err != nil {
+		return "", fmt.Errorf("failed to parse Google response: %w", err)
+	}
+	if len(gResp.Candidates) == 0 || len(gResp.Candidates[0].Content.Parts) == 0 {
+		return "", fmt.Errorf("no response candidates from Google Gemini")
+	}
+
+	return strings.TrimSpace(gResp.Candidates[0].Content.Parts[0].Text), nil
 }

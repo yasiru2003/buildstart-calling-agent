@@ -34,10 +34,13 @@ func main() {
 	maxCalls := flag.Int("max-calls-per-session", 8, "max concurrent calls per session (0 = unlimited)")
 
 	defaultKey := os.Getenv("OPENROUTER_API_KEY")
-	openRouterKey := flag.String("openrouter-key", defaultKey, "OpenRouter API Key for AI Agent")
-	aiModel := flag.String("ai-model", "google/gemini-3.8-flash", "AI Model identifier for OpenRouter")
+	if defaultKey == "" {
+		defaultKey = os.Getenv("GEMINI_API_KEY")
+	}
+	openRouterKey := flag.String("openrouter-key", defaultKey, "OpenRouter or Google Gemini API Key for AI Agent")
+	aiModel := flag.String("ai-model", "gemini-3.6-flash", "AI Model identifier (Google Gemini or OpenRouter)")
 	aiPrompt := flag.String("ai-prompt", "", "Custom system prompt for the AI Voice Agent")
-	aiVoice := flag.String("ai-voice", "si-LK-ThiliniNeural", "Voice model for Text-to-Speech")
+	aiVoice := flag.String("ai-voice", "gemini-aoede", "Voice model for Text-to-Speech (gemini-aoede, gemini-puck, si-LK-ThiliniNeural, piper-ashoka)")
 	aiAutoAnswer := flag.Bool("ai-auto-answer", true, "Automatically answer incoming WhatsApp calls with AI Agent")
 	aiEnabled := flag.Bool("ai-agent", true, "Enable AI Agent voice assistance")
 

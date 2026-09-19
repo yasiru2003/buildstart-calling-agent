@@ -59,7 +59,7 @@ func NewAIAgent(openRouterKey, model, systemPrompt string, log *slog.Logger) *AI
 		log = slog.Default()
 	}
 	orClient := NewOpenRouterClient(openRouterKey, model, systemPrompt)
-	ttsClient := NewMultiTTS("si-LK-SameeraNeural")
+	ttsClient := NewMultiTTS("gemini-aoede")
 	sttClient := NewWhisperSTT("", "")
 	vad := NewVAD(DefaultVADConfig())
 
