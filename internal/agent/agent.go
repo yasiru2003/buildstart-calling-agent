@@ -47,6 +47,7 @@ type AIAgent struct {
 	prewarmMu          sync.Mutex
 	cachedGreetingPCM  []float32
 	cachedGreetingText string
+	cachedFillerPCM    []float32
 	customGreeting     string
 
 	// Output callback to inject 16 kHz Float32 PCM back into WhatsApp CallManager
@@ -93,6 +94,15 @@ func NewAIAgent(openRouterKey, model, systemPrompt string, log *slog.Logger) *AI
 		a.log.Warn("pre-recorded greeting file not found", "path", greetingPath, "err", err)
 	}
 
+	// Load pre-recorded Sinhala filler ("ආ හරි...") for zero-perceived response latency
+	fillerPath := "assets/sounds/filler_sinhala_1.wav"
+	if data, err := os.ReadFile(fillerPath); err == nil {
+		if pcm, err := ParseWAV(data); err == nil && len(pcm) > 0 {
+			a.cachedFillerPCM = pcm
+			a.log.Info("pre-recorded Sinhala filler loaded from disk", "path", fillerPath, "samples", len(pcm))
+		}
+	}
+
 	a.setupVAD()
 	return a
 }
@@ -119,6 +129,17 @@ func (a *AIAgent) handleCallerSpeech(pcm []float32, wav []byte) {
 	defer a.speechLock.Unlock()
 
 	a.setState(StateThinking)
+
+	// Immediately stream a natural brief filler ("ආ හරි...") in the background
+	// so the caller gets instant human feedback (< 100ms) instead of dead silence!
+	if len(a.cachedFillerPCM) > 0 {
+		go func() {
+			time.Sleep(80 * time.Millisecond)
+			if a.GetState() == StateThinking && !a.isSpeaking.Load() {
+				a.streamAudioToCall(a.cachedFillerPCM)
+			}
+		}()
+	}
 
 	// Concurrently query intelligence
 	type chatResult struct {

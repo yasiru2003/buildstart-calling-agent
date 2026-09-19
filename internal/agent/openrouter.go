@@ -15,7 +15,7 @@ import (
 
 const (
 	DefaultOpenRouterURL   = "https://openrouter.ai/api/v1/chat/completions"
-	DefaultOpenRouterModel = "google/gemini-3.8-flash"
+	DefaultOpenRouterModel = "google/gemini-2.5-flash"
 	DefaultSystemPrompt    = `ඔබ Buildstart (බිල්ඩ්ස්ටාර්ට්) වෙනුවෙන් සජීවී WhatsApp දුරකථන ඇමතුමකට පිළිතුරු දෙන දක්ෂ, සුහදශීලී, සැබෑ ශ්‍රී ලාංකික AI කණ්ඩායම් සාමාජිකයෙකි (Buildstart Voice Agent).
 
 [Buildstart පිළිබඳ මූලික දැනුම සහ විකුණුම් පිටපත (Script & Knowledge)]:
@@ -38,8 +38,8 @@ const (
    - ඇමතුම පටන් ගන්නා විටම පෙර පටිගත කළ සුබපැතුම අමතන්නාට ඇසී අවසන්ය. එම නිසා නැවත 'හෙලෝ, ආයුබෝවන්!' නොකියන්න.
    - 'මොනවද දැනගන්න ඕනෙ?' හෝ 'මම කොහොමද උදව් කරන්න ඕනෙ?' කියා නැවත නැවත අසන්න එපා!
    - අමතන්නා යමක් ඇසූ විට, සෘජුවම Buildstart විසඳුම හෝ විස්තරය පැහැදිලි කර, ඔවුන්ගේ ව්‍යාපාරික ක්ෂේත්‍රය කුමක්දැයි අසන්න, නැතහොත් WhatsApp ඩෙමෝ එකට මඟ පෙන්වන්න.
-4. දුරකථන සංවාදයකට ගැළපෙන කෙටි වාක්‍ය (1-3 Sentences):
-   - දුරකථන ඇමතුමක් බැවින් එක් වරකට වාක්‍ය 1-3ක් පමණක් සරලව කියන්න. දිගු දේශනා එපා.
+4. දුරකථන සංවාදයකට ගැළපෙන කෙටි වාක්‍ය (Strictly 1 concise sentence under 15 words):
+   - දුරකථන ඇමතුමක ස්වභාවය අනුව එක් වරකට වචන 15කට නොවැඩි සරල, කෙටි වාක්‍ය 1ක් පමණක් කියන්න. එවිට කිසිදු ප්‍රමාදයකින් තොරව කටහඬ වහාම ප්‍රතිචාර දක්වයි. දිගු දේශනා සම්පූර්ණයෙන්ම තහනම්ය.
 5. Formatting තහනම්:
    - කිසිදු markdown, තරු ලකුණු (*), bullet points හෝ emojis නොයොදන්න. කටහඬින් කියවන සරල පාඨ පමණක් ලබා දෙන්න.`
 )
@@ -188,7 +188,7 @@ func (c *OpenRouterClient) ChatWithAudio(ctx context.Context, wavData []byte) (t
 		"Return JSON only with this exact structure:\n" +
 		"{\n" +
 		"  \"transcription\": \"exact words the caller said in Sinhala or English (leave empty if unintelligible or pure silence)\",\n" +
-		"  \"reply\": \"warm, natural, spoken conversational response as the Buildstart AI team member in colloquial everyday Sinhala (1-2 brief sentences, natural spoken Sinhala using 'ඔයා', SOV verb at the end, directly answer their question about Buildstart or their business, never repeat greeting or questions like 'මොනවද දැනගන්න ඕනෙ' or 'කොහොමද උදව් කරන්න ඕනෙ', progress the conversation towards understanding their business or trying the WhatsApp demo, no emojis, no asterisks, no bullet points)\"\n" +
+		"  \"reply\": \"warm, natural, spoken conversational response as the Buildstart AI team member in colloquial everyday Sinhala (strictly 1 concise spoken sentence, under 15 words, natural spoken Sinhala using 'ඔයා', SOV verb at the end, directly answer their question about Buildstart or their business, never repeat greeting or questions like 'මොනවද දැනගන්න ඕනෙ' or 'කොහොමද උදව් කරන්න ඕනෙ', progress the conversation towards understanding their business or trying the WhatsApp demo, no emojis, no asterisks, no bullet points)\"\n" +
 		"}"
 
 	c.mu.Lock()
@@ -261,7 +261,7 @@ func (c *OpenRouterClient) sendRequest(ctx context.Context, apiKey, model string
 		"messages":    msgs,
 		"temperature": c.temperature,
 		"max_tokens":  c.maxTokens,
-		"reasoning":   map[string]string{"effort": "low"},
+		"reasoning":   map[string]string{"effort": "none"},
 	}
 	if jsonFormat {
 		reqBody["response_format"] = map[string]string{"type": "json_object"}

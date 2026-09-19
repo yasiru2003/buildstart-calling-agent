@@ -206,7 +206,7 @@ class GeminiLiveService:
                         "clientContent": {
                             "turns": [{
                                 "role": "user",
-                                "parts": [{"text": f"<<<SCRIPT>>>{text}<<<SCRIPT>>>"}]
+                                "parts": [{"text": f"Read verbatim in natural Sinhala: {text}"}]
                             }],
                             "turnComplete": True
                         }
@@ -221,7 +221,7 @@ class GeminiLiveService:
                         for p in server_turn.get("parts", []):
                             if "inlineData" in p:
                                 raw_pcm.extend(base64.b64decode(p["inlineData"]["data"]))
-                        if data.get("serverContent", {}).get("turnComplete") or data.get("serverContent", {}).get("generationComplete"):
+                        if data.get("serverContent", {}).get("turnComplete"):
                             break
 
                     if len(raw_pcm) > 0:
@@ -231,11 +231,7 @@ class GeminiLiveService:
                             wf.setsampwidth(2)
                             wf.setframerate(24000)
                             wf.writeframes(raw_pcm)
-                        try:
-                            await ws.close()
-                        except Exception:
-                            pass
-                        entry['ws'] = None
+                        # Keep WebSocket open for ultra-fast subsequent turns
                         return buf.getvalue()
                     raise RuntimeError("Gemini Live sent zero audio bytes")
                 except Exception as e:
