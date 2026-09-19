@@ -377,6 +377,31 @@ func cleanSpeechText(s string) string {
 	s = strings.ReplaceAll(s, "#", "")
 	s = strings.ReplaceAll(s, "`", "")
 	s = strings.ReplaceAll(s, "\n", " ")
+
+	// Normalize formal/bookish words to authentic spoken colloquial Sinhala
+	replacements := [][2]string{
+		{"ඔබගේ", "ඔයාගෙ"},
+		{"ඔබට", "ඔයාට"},
+		{"ඔබව", "ඔයාව"},
+		{"ඔබෙන්", "ඔයාගෙන්"},
+		{"ඔබ", "ඔයා"},
+		{"උදවු", "උදව්"},
+		{"පවසන්න", "කියන්න"},
+		{"පවසන්නකො", "කියන්නකො"},
+		{"හැකියි", "පුළුවන්"},
+		{"හැකිය", "පුළුවන්"},
+		{"හැකිද", "පුළුවන්ද"},
+		{"නැවත", "ආයෙත්"},
+		{"පැමිණෙන්න", "එන්න"},
+		{"විමසන්න", "අහන්න"},
+		{"ලබාගන්න", "ගන්න"},
+		{"සැපයිය හැකිය", "දෙන්න පුළුවන්"},
+		{"හලෝ", "හෙලෝ"},
+	}
+	for _, r := range replacements {
+		s = strings.ReplaceAll(s, r[0], r[1])
+	}
+
 	return strings.TrimSpace(s)
 }
 

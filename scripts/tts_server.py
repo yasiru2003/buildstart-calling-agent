@@ -74,11 +74,20 @@ COLLOQUIAL_MAP = [
     ('ඔබගේ', 'ඔයාගෙ'),
     ('ඔබට', 'ඔයාට'),
     ('ඔබව', 'ඔයාව'),
+    ('ඔබෙන්', 'ඔයාගෙන්'),
     ('ඔබ', 'ඔයා'),
     ('උදවු', 'උදව්'),
     ('පවසන්න', 'කියන්න'),
+    ('පවසන්නකො', 'කියන්නකො'),
     ('හැකියි', 'පුළුවන්'),
+    ('හැකිය', 'පුළුවන්'),
     ('හැකිද', 'පුළුවන්ද'),
+    ('නැවත', 'ආයෙත්'),
+    ('පැමිණෙන්න', 'එන්න'),
+    ('විමසන්න', 'අහන්න'),
+    ('ලබාගන්න', 'ගන්න'),
+    ('සැපයිය හැකිය', 'දෙන්න පුළුවන්'),
+    ('හලෝ', 'හෙලෝ'),
 ]
 
 
@@ -153,7 +162,7 @@ class GeminiLiveService:
 
         host = "generativelanguage.googleapis.com"
         ws_url = f"wss://{host}/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key={self.api_key}"
-        ws = await websockets.connect(ws_url, ping_interval=20, ping_timeout=20, close_timeout=3)
+        ws = await websockets.connect(ws_url, open_timeout=15, ping_interval=20, ping_timeout=20, close_timeout=3)
         setup = {
             "setup": {
                 "model": "models/gemini-2.5-flash-native-audio-latest",
@@ -222,6 +231,11 @@ class GeminiLiveService:
                             wf.setsampwidth(2)
                             wf.setframerate(24000)
                             wf.writeframes(raw_pcm)
+                        try:
+                            await ws.close()
+                        except Exception:
+                            pass
+                        entry['ws'] = None
                         return buf.getvalue()
                     raise RuntimeError("Gemini Live sent zero audio bytes")
                 except Exception as e:
@@ -240,13 +254,13 @@ class GeminiLiveService:
         """Pre-warm WebSocket connection in the background."""
         def _warm():
             try:
-                fut = asyncio.run_coroutine_threadsafe(self._get_connection(voice_name), self.loop)
-                fut.result(timeout=10.0)
+                self.synthesize("හෙලෝ", voice_name, timeout=15.0)
+                print(f"✨ Gemini Live prewarm completed for voice '{voice_name}'")
             except Exception as e:
                 print(f"⚠️ Gemini Live prewarm notice: {e}")
         threading.Thread(target=_warm, daemon=True).start()
 
-    def synthesize(self, text: str, voice: str = "Aoede", timeout: float = 18.0) -> bytes:
+    def synthesize(self, text: str, voice: str = "Aoede", timeout: float = 25.0) -> bytes:
         v_map = {
             "gemini-aoede": "Aoede", "gemini-puck": "Puck", "gemini-charon": "Charon",
             "gemini-kore": "Kore", "gemini-fenrir": "Fenrir",

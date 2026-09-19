@@ -166,7 +166,7 @@ func (a *AIAgent) PrewarmGreeting() {
 	if !a.enabled.Load() {
 		return
 	}
-	greeting := "හලෝ, ආයුබෝවන්! කියන්න, මම කොහොමද උදව් කරන්න ඕනෙ?"
+	greeting := "හෙලෝ, ආයුබෝවන්! කියන්නකො, මම කොහොමද ඔයාට උදව් කරන්න ඕනෙ?"
 	if strings.HasPrefix(a.tts.GetVoice(), "en-") {
 		greeting = "Hello! How can I help you today?"
 	}
@@ -202,7 +202,7 @@ func (a *AIAgent) GreetCaller() {
 		a.speechLock.Lock()
 		defer a.speechLock.Unlock()
 
-		greeting := "හලෝ, ආයුබෝවන්! කියන්න, මම කොහොමද උදව් කරන්න ඕනෙ?"
+		greeting := "හෙලෝ, ආයුබෝවන්! කියන්නකො, මම කොහොමද ඔයාට උදව් කරන්න ඕනෙ?"
 		if strings.HasPrefix(a.tts.GetVoice(), "en-") {
 			greeting = "Hello! How can I help you today?"
 		}
