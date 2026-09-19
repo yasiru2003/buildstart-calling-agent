@@ -89,7 +89,7 @@ func (a *AIAgent) setupVAD() {
 	}
 
 	a.vad.OnSpeechEnd = func(pcm []float32, wav []byte) {
-		if !a.enabled.Load() || a.isSpeaking.Load() {
+		if !a.enabled.Load() || a.isSpeaking.Load() || a.GetState() == StateThinking || a.GetState() == StateSpeaking {
 			return
 		}
 		a.log.Info("caller finished speaking, generating AI response", "samples", len(pcm), "wavBytes", len(wav))
@@ -368,6 +368,12 @@ func (a *AIAgent) SetOpenAITTS(url, key string) {
 	if a.tts != nil {
 		a.tts.SetOpenAIConfig(url, key)
 	}
+}
+
+func (a *AIAgent) GetState() AgentState {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.state
 }
 
 func (a *AIAgent) setState(s AgentState) {

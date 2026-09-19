@@ -149,6 +149,9 @@ def synthesize_gemini_tts(text: str, voice: str = "Aoede") -> bytes:
             setup = {
                 "setup": {
                     "model": "models/gemini-2.5-flash-native-audio-latest",
+                    "systemInstruction": {
+                        "parts": [{"text": "You are an extremely natural voice speaker. Speak the user given Sinhala text warmly, casually, and naturally like a real human on a phone call. Never explain, never say \"here is the audio\", never say \"generating audio\", never speak in English. Only speak the Sinhala words."}]
+                    },
                     "generationConfig": {
                         "responseModalities": ["AUDIO"],
                         "speechConfig": {
@@ -157,6 +160,9 @@ def synthesize_gemini_tts(text: str, voice: str = "Aoede") -> bytes:
                                     "voiceName": voice_name
                                 }
                             }
+                        },
+                        "thinkingConfig": {
+                            "thinkingBudget": 0
                         }
                     }
                 }
@@ -168,7 +174,7 @@ def synthesize_gemini_tts(text: str, voice: str = "Aoede") -> bytes:
                 "clientContent": {
                     "turns": [{
                         "role": "user",
-                        "parts": [{"text": f"Please read the following text aloud warmly in Sinhala: {text}"}]
+                        "parts": [{"text": f"Speak this: {text}"}]
                     }],
                     "turnComplete": True
                 }
