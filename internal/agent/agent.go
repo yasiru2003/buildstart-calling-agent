@@ -161,19 +161,7 @@ func (a *AIAgent) handleCallerSpeech(pcm []float32, wav []byte) {
 }
 
 func (a *AIAgent) prewarmThinkingFillers() {
-	fillers := []string{"හ්ම්...", "හරි...", "ආ හරි..."}
-	if strings.HasPrefix(a.tts.GetVoice(), "en-") {
-		fillers = []string{"Hmm...", "Right...", "I see..."}
-	}
-	for _, text := range fillers {
-		pcm, err := a.tts.Synthesize(a.ctx, text)
-		if err == nil && len(pcm) > 0 {
-			a.prewarmMu.Lock()
-			a.thinkingFillers = append(a.thinkingFillers, pcm)
-			a.prewarmMu.Unlock()
-			a.log.Info("thinking filler pre-warmed", "text", text, "samples", len(pcm))
-		}
-	}
+	// Skip prewarming overhead so Gemini Live audio is purely reserved for caller interaction
 }
 
 func (a *AIAgent) playNextThinkingFiller() {

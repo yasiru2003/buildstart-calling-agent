@@ -8,11 +8,13 @@ with local Piper TTS (si_LK-sinhala-medium ONNX) as offline fallback.
 import asyncio
 import base64
 import io
+import json
 import os
 import re
 import sys
 import threading
 import wave
+import websockets
 import numpy as np
 import requests
 from flask import Flask, request, Response, jsonify
@@ -126,7 +128,7 @@ def synthesize_elevenlabs(text: str, voice_id: str = ELEVENLABS_VOICE_ID) -> byt
 
 
 def synthesize_gemini_tts(text: str, voice: str = "Aoede") -> bytes:
-    """Generate human-lifelike speech directly using Google AI Studio Gemini Flash TTS."""
+    """Generate human-lifelike speech directly using Google AI Studio Gemini Live Multimodal WebSocket."""
     if not GEMINI_API_KEY:
         raise ValueError("GEMINI_API_KEY is not configured")
 
@@ -137,6 +139,76 @@ def synthesize_gemini_tts(text: str, voice: str = "Aoede") -> bytes:
         "kore": "Kore", "fenrir": "Fenrir",
     }
     voice_name = v_map.get(voice.lower(), "Aoede")
+
+    # 1. Primary: Gemini Multimodal Live WebSocket (Zero Daily Quota / True AI Studio Voice)
+    async def _ws_synth():
+        import websockets
+        host = "generativelanguage.googleapis.com"
+        ws_url = f"wss://{host}/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key={GEMINI_API_KEY}"
+        async with websockets.connect(ws_url, close_timeout=2) as ws:
+            setup = {
+                "setup": {
+                    "model": "models/gemini-2.5-flash-native-audio-latest",
+                    "generationConfig": {
+                        "responseModalities": ["AUDIO"],
+                        "speechConfig": {
+                            "voiceConfig": {
+                                "prebuiltVoiceConfig": {
+                                    "voiceName": voice_name
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            await ws.send(json.dumps(setup))
+            await asyncio.wait_for(ws.recv(), timeout=4)  # setupComplete
+
+            client_turn = {
+                "clientContent": {
+                    "turns": [{
+                        "role": "user",
+                        "parts": [{"text": f"Please read the following text aloud warmly in Sinhala: {text}"}]
+                    }],
+                    "turnComplete": True
+                }
+            }
+            await ws.send(json.dumps(client_turn))
+
+            raw_pcm = bytearray()
+            while True:
+                msg = await asyncio.wait_for(ws.recv(), timeout=8)
+                data = json.loads(msg)
+                server_turn = data.get("serverContent", {}).get("modelTurn", {})
+                for p in server_turn.get("parts", []):
+                    if "inlineData" in p:
+                        raw_pcm.extend(base64.b64decode(p["inlineData"]["data"]))
+                if data.get("serverContent", {}).get("turnComplete"):
+                    break
+
+            if len(raw_pcm) > 0:
+                buf = io.BytesIO()
+                with wave.open(buf, "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(24000)
+                    wf.writeframes(raw_pcm)
+                return buf.getvalue()
+            return b""
+
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            res = loop.run_until_complete(_ws_synth())
+            if res and len(res) > 100:
+                return res
+        finally:
+            loop.close()
+    except Exception as ws_err:
+        print(f"⚠️ Gemini Live WS error: {ws_err}, trying REST...")
+
+    # 2. Secondary: REST Endpoint (gemini-3.1-flash-tts-preview)
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-tts-preview:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "contents": [{"parts": [{"text": text}]}],
@@ -151,7 +223,7 @@ def synthesize_gemini_tts(text: str, voice: str = "Aoede") -> bytes:
             }
         }
     }
-    resp = requests.post(url, json=payload, timeout=12)
+    resp = requests.post(url, json=payload, timeout=8)
     if resp.status_code == 200:
         res_json = resp.json()
         candidates = res_json.get("candidates", [])
@@ -166,7 +238,7 @@ def synthesize_gemini_tts(text: str, voice: str = "Aoede") -> bytes:
                         wf.setframerate(24000)
                         wf.writeframes(raw_pcm)
                     return buf.getvalue()
-    raise RuntimeError(f"Gemini Flash TTS error {resp.status_code}: {resp.text[:150]}")
+    raise RuntimeError(f"Gemini Live error: {resp.text[:120]}")
 
 
 def synthesize_edge_tts(text: str, voice: str = DEFAULT_VOICE, rate: str = RATE_MODIFIER, pitch: str = PITCH_MODIFIER) -> bytes:
