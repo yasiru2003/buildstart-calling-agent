@@ -16,7 +16,15 @@ import (
 const (
 	DefaultOpenRouterURL   = "https://openrouter.ai/api/v1/chat/completions"
 	DefaultOpenRouterModel = "google/gemini-2.5-flash"
-	DefaultSystemPrompt    = "ඔබ ඉතා මිත්‍රශීලී, උණුසුම් සහ ස්වාභාවික මිනිසෙකු මෙන් කතා කරන සිංහල AI සහායකයෙකි. ඔබ සජීවී WhatsApp දුරකථන ඇමතුමකට පිළිතුරු දෙයි.\n\nකතා කරන ආකාරය:\n1. සැබෑ මිනිසෙකු සේ ස්වාභාවිකව 'හ්ම්...', 'ආ...', 'හරි...', 'ඔව්...', 'එහෙමද...' වැනි වචන සුළු වශයෙන් යොදාගනිමින් කතාබහ කරන්න.\n2. පොත් බසින් නොව සාමාන්‍ය කතාබහ කරන ජීවමාන සිංහලෙන් (Colloquial Spoken Sinhala) කෙටියෙන් (වාක්‍ය 1-2 කින්) පිළිතුරු දෙන්න.\n3. ඉලක්කම් ලිවීමේදී ශබ්ද නගා කියවිය හැකි ලෙස සිංහල අකුරෙන් ලියන්න (උදා: 'දහය', 'දෙසීයක්').\n4. කිසිවිටෙකත් markdown, තරු ලකුණු (*), bullet points හෝ emojis භාවිතා නොකරන්න."
+	DefaultSystemPrompt    = `ඔබ සජීවී WhatsApp දුරකථන ඇමතුමකට පිළිතුරු දෙන මිත්‍රශීලී, කාරුණික සහ ඉතා ස්වාභාවික මිනිස් හඬ සහායකයෙකි.
+
+අතිශය වැදගත් උපදෙස්:
+1. කතා කරන බස (Spoken Sinhala): කිසිවිටෙකත් ලියන/පොත් බසින් කතා නොකරන්න. සැබෑ මිනිසුන් දුරකථනයෙන් කතා කරන සරල, ජීවමාන සිංහලෙන් කතා කරන්න.
+2. සංවාදශීලී බව: පෙර කියූ දේම නැවත නැවත නොකියා, අමතන්නාගේ ප්‍රශ්නයට හෝ අදහසට සෘජුව සහ උණුසුම්ව පිළිතුරු දෙන්න. කලින් ආයුබෝවන් කිව්වා නම් නැවත ආයුබෝවන් නොකියන්න.
+3. ස්වාභාවික හැඟීම්: 'ආ හරි...', 'ඔව්...', 'හ්ම්...', 'ඇත්තටම...', 'අනිවාර්යයෙන්ම...' වැනි ස්වාභාවික වචන මුලට යොදාගෙන පිළිතුරු දෙන්න.
+4. කෙටි සහ පැහැදිලි: දුරකථන ඇමතුමක් බැවින් එක් වරකට වාක්‍ය 1-2 කින් පමණක් කෙටියෙන් පිළිතුරු දෙන්න.
+5. අංක කියවීම: ඕනෑම අංකයක් හෝ මිලක් කියවීමේදී අකුරෙන් ලියන්න (උදා: 077 නොව 'බිංදුවයි හතයි හත...', 500 නොව 'පන්සීයක්').
+6. කිසිදු markdown, තරු ලකුණු (*), bullet points හෝ emojis භාවිත නොකරන්න.`
 )
 
 type ChatMessage struct {
@@ -141,23 +149,25 @@ func (c *OpenRouterClient) Chat(ctx context.Context, userText string) (string, e
 func (c *OpenRouterClient) ChatWithAudio(ctx context.Context, wavData []byte) (transcription string, reply string, err error) {
 	b64Audio := base64.StdEncoding.EncodeToString(wavData)
 
-	audioPrompt := "Analyze the caller's spoken audio from this live WhatsApp telephone call.\n" +
+	audioPrompt := "Listen carefully to what the caller said in this live phone call audio.\n" +
 		"Return JSON only with this exact structure:\n" +
 		"{\n" +
 		"  \"transcription\": \"exact words the caller said in Sinhala or English (leave empty if unintelligible or pure silence)\",\n" +
-		"  \"reply\": \"warm, natural, spoken conversational response in colloquial Sinhala (1-2 brief sentences, no emojis, no asterisks, no bullet points)\"\n" +
+		"  \"reply\": \"warm, natural, spoken conversational response in colloquial everyday Sinhala (1-2 brief sentences, talk like a real caring human friend on a phone, no robotic or bookish phrases, directly respond to what they asked/said, do not repeat yourself, no emojis, no asterisks, no bullet points)\"\n" +
 		"}"
 
 	c.mu.Lock()
-	c.history = append(c.history, ChatMessage{
+	// Build request messages without permanently storing the large audio payload in history
+	audioMsg := ChatMessage{
 		Role: "user",
 		Content: []ContentPart{
 			{Type: "text", Text: audioPrompt},
 			{Type: "input_audio", InputAudio: &InputAudioPart{Data: b64Audio, Format: "wav"}},
 		},
-	})
-	msgs := make([]ChatMessage, len(c.history))
+	}
+	msgs := make([]ChatMessage, len(c.history)+1)
 	copy(msgs, c.history)
+	msgs[len(c.history)] = audioMsg
 	apiKey := c.apiKey
 	model := c.model
 	c.mu.Unlock()
@@ -184,6 +194,15 @@ func (c *OpenRouterClient) ChatWithAudio(ctx context.Context, wavData []byte) (t
 	}
 
 	c.mu.Lock()
+	// Store the compact text version in history so future turns do not re-send audio blobs
+	userHistoryText := transcription
+	if userHistoryText == "" {
+		userHistoryText = "[Caller spoken audio]"
+	}
+	c.history = append(c.history, ChatMessage{
+		Role:    "user",
+		Content: userHistoryText,
+	})
 	c.history = append(c.history, ChatMessage{
 		Role:    "assistant",
 		Content: reply,

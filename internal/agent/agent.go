@@ -41,9 +41,11 @@ type AIAgent struct {
 	speechLock sync.Mutex
 
 	// Pre-synthesized greeting audio — populated during ring delay so it plays instantly
-	prewarmPCM     []float32
-	prewarmMu      sync.Mutex
-	customGreeting string
+	prewarmPCM      []float32
+	thinkingFillers [][]float32
+	fillerIdx       int
+	prewarmMu       sync.Mutex
+	customGreeting  string
 
 	// Output callback to inject 16 kHz Float32 PCM back into WhatsApp CallManager
 	FeedAudio func(pcm []float32)
@@ -57,7 +59,7 @@ func NewAIAgent(openRouterKey, model, systemPrompt string, log *slog.Logger) *AI
 		log = slog.Default()
 	}
 	orClient := NewOpenRouterClient(openRouterKey, model, systemPrompt)
-	ttsClient := NewMultiTTS("si-LK-ThiliniNeural")
+	ttsClient := NewMultiTTS("si-LK-SameeraNeural")
 	sttClient := NewWhisperSTT("", "")
 	vad := NewVAD(DefaultVADConfig())
 
@@ -73,6 +75,7 @@ func NewAIAgent(openRouterKey, model, systemPrompt string, log *slog.Logger) *AI
 		state:      StateIdle,
 	}
 	a.enabled.Store(true)
+
 	a.setupVAD()
 	return a
 }
@@ -100,12 +103,31 @@ func (a *AIAgent) handleCallerSpeech(pcm []float32, wav []byte) {
 
 	a.setState(StateThinking)
 
-	// Step 1: OpenRouter Multimodal Voice Intelligence (Sinhala Audio Transcription & Conversational Reply)
-	transcription, replyText, err := a.openRouter.ChatWithAudio(a.ctx, wav)
-	if err != nil {
-		a.log.Warn("multimodal chat retry with text", "err", err)
-		replyText, err = a.openRouter.Chat(a.ctx, "The caller just finished speaking on the phone. Answer warmly in 1-2 brief spoken sentences in Sinhala.")
+	// Concurrently query OpenRouter while playing a natural human thinking vocalization ("හ්ම්..." / "හරි...")
+	type chatResult struct {
+		transcription string
+		replyText     string
+		err           error
 	}
+	resChan := make(chan chatResult, 1)
+
+	go func() {
+		t, r, err := a.openRouter.ChatWithAudio(a.ctx, wav)
+		if err != nil {
+			a.log.Warn("multimodal chat retry with text", "err", err)
+			r, err = a.openRouter.Chat(a.ctx, "The caller just finished speaking on the phone. Answer warmly in 1-2 brief spoken sentences in Sinhala.")
+		}
+		resChan <- chatResult{transcription: t, replyText: r, err: err}
+	}()
+
+	// Instantly play a natural thinking vocalization so caller never hears dead silence
+	a.playNextThinkingFiller()
+
+	// Wait for the intelligence result
+	res := <-resChan
+	transcription := res.transcription
+	replyText := res.replyText
+	err := res.err
 
 	if strings.TrimSpace(transcription) != "" {
 		a.emitTranscript("user", transcription)
@@ -115,8 +137,11 @@ func (a *AIAgent) handleCallerSpeech(pcm []float32, wav []byte) {
 
 	if err != nil || replyText == "" {
 		a.log.Error("OpenRouter response empty", "err", err)
-		replyText = "මම අසා සිටිමි, කරුණාකර දිගටම කතා කරන්න."
+		replyText = "මම අසා සිටිමි, කියන්නකො."
 	}
+
+	// Remove duplicate filler from start of reply since we already vocalized it
+	replyText = cleanDuplicateFiller(replyText)
 
 	a.log.Info("AI response generated", "transcription", transcription, "reply", replyText)
 	a.emitTranscript("assistant", replyText)
@@ -135,6 +160,58 @@ func (a *AIAgent) handleCallerSpeech(pcm []float32, wav []byte) {
 	a.setState(StateIdle)
 }
 
+func (a *AIAgent) prewarmThinkingFillers() {
+	fillers := []string{"හ්ම්...", "හරි...", "ආ හරි..."}
+	if strings.HasPrefix(a.tts.GetVoice(), "en-") {
+		fillers = []string{"Hmm...", "Right...", "I see..."}
+	}
+	for _, text := range fillers {
+		pcm, err := a.tts.Synthesize(a.ctx, text)
+		if err == nil && len(pcm) > 0 {
+			a.prewarmMu.Lock()
+			a.thinkingFillers = append(a.thinkingFillers, pcm)
+			a.prewarmMu.Unlock()
+			a.log.Info("thinking filler pre-warmed", "text", text, "samples", len(pcm))
+		}
+	}
+}
+
+func (a *AIAgent) playNextThinkingFiller() {
+	a.prewarmMu.Lock()
+	if len(a.thinkingFillers) == 0 {
+		a.prewarmMu.Unlock()
+		return
+	}
+	filler := a.thinkingFillers[a.fillerIdx%len(a.thinkingFillers)]
+	a.fillerIdx++
+	a.prewarmMu.Unlock()
+
+	if len(filler) > 0 {
+		a.log.Info("playing natural thinking filler vocalization", "samples", len(filler))
+		a.streamAudioToCall(filler)
+	}
+}
+
+func cleanDuplicateFiller(text string) string {
+	fillers := []string{
+		"හ්ම්...", "හ්ම්..", "හ්ම්,", "හ්ම් ", "හ්ම්",
+		"ආ හරි,", "ආ හරි...", "ආ...", "ආ..", "ආ,",
+		"හරි,", "හරි...", "ඔව්,", "ඔව්...",
+	}
+	trimmed := strings.TrimSpace(text)
+	for _, f := range fillers {
+		if strings.HasPrefix(trimmed, f) {
+			trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, f))
+			trimmed = strings.TrimPrefix(trimmed, ",")
+			trimmed = strings.TrimSpace(trimmed)
+		}
+	}
+	if trimmed == "" {
+		return text
+	}
+	return trimmed
+}
+
 func (a *AIAgent) SetCustomGreeting(text string) {
 	a.prewarmMu.Lock()
 	defer a.prewarmMu.Unlock()
@@ -148,15 +225,17 @@ func (a *AIAgent) PrewarmGreeting() {
 	if !a.enabled.Load() {
 		return
 	}
-	greeting := "ආයුබෝවන්! හ්ම්... මම ඔබගේ සහායකයා. මම ඔබට අද කොහොමද උදවු කරන්නේ?"
+	greeting := "හලෝ, ආයුබෝවන්! කියන්න, මම කොහොමද උදව් කරන්න ඕනෙ?"
 	if strings.HasPrefix(a.tts.GetVoice(), "en-") {
-		greeting = "Hello! I am your AI voice assistant. How can I help you today?"
+		greeting = "Hello! How can I help you today?"
 	}
 	a.prewarmMu.Lock()
 	if a.customGreeting != "" {
 		greeting = a.customGreeting
 	}
 	a.prewarmMu.Unlock()
+
+	go a.prewarmThinkingFillers()
 
 	go func() {
 		pcm, err := a.tts.Synthesize(a.ctx, greeting)
@@ -171,23 +250,12 @@ func (a *AIAgent) PrewarmGreeting() {
 	}()
 }
 
-// GreetCaller plays a brief initial greeting when the call connects.
-// It uses the pre-synthesized audio from PrewarmGreeting if available.
 func (a *AIAgent) GreetCaller() {
 	if !a.enabled.Load() {
 		return
 	}
-	greeting := "ආයුබෝවන්! හ්ම්... මම ඔබගේ සහායකයා. මම ඔබට අද කොහොමද උදවු කරන්නේ?"
-	if strings.HasPrefix(a.tts.GetVoice(), "en-") {
-		greeting = "Hello! I am your AI voice assistant. How can I help you today?"
-	}
-	a.prewarmMu.Lock()
-	if a.customGreeting != "" {
-		greeting = a.customGreeting
-	}
-	a.prewarmMu.Unlock()
 	go func() {
-		// Short safety margin to let media path fully establish
+		// Short safety margin to let WhatsApp media path fully establish
 		time.Sleep(150 * time.Millisecond)
 		if !a.enabled.Load() || a.isSpeaking.Load() {
 			return
@@ -195,8 +263,14 @@ func (a *AIAgent) GreetCaller() {
 		a.speechLock.Lock()
 		defer a.speechLock.Unlock()
 
-		// Use pre-synthesized audio if ready, otherwise synthesize now
+		greeting := "හලෝ, ආයුබෝවන්! කියන්න, මම කොහොමද උදව් කරන්න ඕනෙ?"
+		if strings.HasPrefix(a.tts.GetVoice(), "en-") {
+			greeting = "Hello! How can I help you today?"
+		}
 		a.prewarmMu.Lock()
+		if a.customGreeting != "" {
+			greeting = a.customGreeting
+		}
 		outPCM := a.prewarmPCM
 		a.prewarmPCM = nil
 		a.prewarmMu.Unlock()
@@ -223,7 +297,7 @@ func (a *AIAgent) streamAudioToCall(pcm []float32) {
 	a.isSpeaking.Store(true)
 	defer func() {
 		// Cooldown period after speech ends to prevent speaker echo triggering VAD
-		time.Sleep(400 * time.Millisecond)
+		time.Sleep(350 * time.Millisecond)
 		a.vad.Reset()
 		a.isSpeaking.Store(false)
 	}()
@@ -246,9 +320,7 @@ func (a *AIAgent) streamAudioToCall(pcm []float32) {
 		if a.FeedAudio != nil {
 			a.FeedAudio(frame)
 		}
-		if offset > 0 {
-			<-ticker.C
-		}
+		<-ticker.C
 	}
 }
 

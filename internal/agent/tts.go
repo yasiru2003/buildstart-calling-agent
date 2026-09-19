@@ -154,7 +154,7 @@ func (t *MultiTTS) Synthesize(ctx context.Context, text string) ([]float32, erro
 
 func (t *MultiTTS) synthesizeLocal(ctx context.Context, text string) ([]float32, error) {
 	reqURL := "http://127.0.0.1:5050/synthesize"
-	reqBody := map[string]any{"input": text}
+	reqBody := map[string]any{"input": text, "voice": t.voice}
 	payload, err := json.Marshal(reqBody)
 	if err != nil {
 		return nil, err
@@ -166,8 +166,7 @@ func (t *MultiTTS) synthesizeLocal(ctx context.Context, text string) ([]float32,
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	// Fast timeout so it quickly falls through if local daemon is not running
-	client := &http.Client{Timeout: 4 * time.Second}
+	client := &http.Client{Timeout: 12 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err

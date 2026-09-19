@@ -57,7 +57,7 @@ func newSession(mgr *SessionManager, id, name string, client *whatsmeow.Client) 
 }
 
 func (s *Session) createCall(callID string) *call.CallManager {
-	cm := call.NewCallManager(wa.NewSocket(s.client), s.log)
+	cm := call.NewCallManager(wa.NewSocket(s.client), s.log.With("call_id", callID))
 	ac := &activeCall{cm: cm}
 
 	if cfg := s.mgr.agentConfig; cfg != nil {
