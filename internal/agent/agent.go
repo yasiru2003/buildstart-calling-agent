@@ -3,8 +3,6 @@ package agent
 import (
 	"context"
 	"log/slog"
-	"math"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,13 +39,12 @@ type AIAgent struct {
 	isSpeaking atomic.Bool
 	peerFrames atomic.Int64
 	speechLock sync.Mutex
+	streamMu   sync.Mutex
 
 	// Pre-synthesized greeting audio — populated during ring delay so it plays instantly
-	prewarmPCM      []float32
-	thinkingFillers [][]float32
-	fillerIdx       int
-	prewarmMu       sync.Mutex
-	customGreeting  string
+	prewarmPCM     []float32
+	prewarmMu      sync.Mutex
+	customGreeting string
 
 	// Output callback to inject 16 kHz Float32 PCM back into WhatsApp CallManager
 	FeedAudio func(pcm []float32)
@@ -79,7 +76,6 @@ func NewAIAgent(openRouterKey, model, systemPrompt string, log *slog.Logger) *AI
 	a.enabled.Store(true)
 
 	a.setupVAD()
-	a.loadDefaultFillers()
 	return a
 }
 
@@ -105,18 +101,6 @@ func (a *AIAgent) handleCallerSpeech(pcm []float32, wav []byte) {
 	defer a.speechLock.Unlock()
 
 	a.setState(StateThinking)
-
-	// Continuous thinking presence: plays conversational thinking fillers while waiting for AI
-	thinkingDone := make(chan struct{})
-	var thinkingStopped atomic.Bool
-	stopThinking := func() {
-		if thinkingStopped.CompareAndSwap(false, true) {
-			close(thinkingDone)
-		}
-	}
-	defer stopThinking()
-
-	go a.runContinuousThinkingSound(thinkingDone)
 
 	// Concurrently query intelligence
 	type chatResult struct {
@@ -152,13 +136,10 @@ func (a *AIAgent) handleCallerSpeech(pcm []float32, wav []byte) {
 		replyText = "මම අසා සිටිමි, කියන්නකො."
 	}
 
-	// Remove duplicate filler from start of reply since we already vocalized it
-	replyText = cleanDuplicateFiller(replyText)
-
 	a.log.Info("AI response generated", "transcription", transcription, "reply", replyText)
 	a.emitTranscript("assistant", replyText)
 
-	// Step 2: High-Fidelity Text to Speech (thinking sound is still running so caller hears no dead silence)
+	// Step 2: High-Fidelity Text to Speech (Google AI Studio Gemini Live Voice)
 	a.setState(StateSpeaking)
 	outPCM, err := a.tts.Synthesize(a.ctx, replyText)
 	if err != nil || len(outPCM) == 0 {
@@ -167,101 +148,9 @@ func (a *AIAgent) handleCallerSpeech(pcm []float32, wav []byte) {
 		return
 	}
 
-	// Step 3: Stop thinking sound the moment real synthesized audio is ready
-	stopThinking()
-
 	// Stream synthesized audio to WhatsApp VoIP
 	a.streamAudioToCall(outPCM)
 	a.setState(StateIdle)
-}
-
-func (a *AIAgent) runContinuousThinkingSound(stopChan <-chan struct{}) {
-	select {
-	case <-stopChan:
-		return
-	case <-a.ctx.Done():
-		return
-	default:
-		a.playNextThinkingFiller()
-	}
-}
-
-func (a *AIAgent) loadDefaultFillers() {
-	paths := []string{
-		"assets/sounds/filler_hmm.mp3",
-		"assets/sounds/filler_right.mp3",
-		"assets/sounds/filler_yes.mp3",
-		"assets/sounds/filler_wait.mp3",
-	}
-	var loaded [][]float32
-	for _, p := range paths {
-		data, err := os.ReadFile(p)
-		if err == nil {
-			pcm, err := decodeMP3To16kFloat32(data)
-			if err == nil && len(pcm) > 0 {
-				loaded = append(loaded, pcm)
-			}
-		}
-	}
-	if len(loaded) == 0 {
-		loaded = append(loaded, generateNaturalThinkingTone(0.8))
-	}
-	a.prewarmMu.Lock()
-	a.thinkingFillers = loaded
-	a.prewarmMu.Unlock()
-	a.log.Info("loaded thinking fillers for continuous presence", "count", len(loaded))
-}
-
-func generateNaturalThinkingTone(duration float64) []float32 {
-	samples := int(16000 * duration)
-	pcm := make([]float32, samples)
-	for i := 0; i < samples; i++ {
-		t := float64(i) / 16000.0
-		env := math.Sin(math.Pi * t / duration)
-		val := 0.15 * env * (0.8*math.Sin(2*math.Pi*180*t) + 0.2*math.Sin(2*math.Pi*360*t))
-		pcm[i] = float32(val)
-	}
-	return pcm
-}
-
-func (a *AIAgent) prewarmThinkingFillers() {
-	// Pre-loaded offline via loadDefaultFillers()
-}
-
-func (a *AIAgent) playNextThinkingFiller() {
-	a.prewarmMu.Lock()
-	if len(a.thinkingFillers) == 0 {
-		a.prewarmMu.Unlock()
-		return
-	}
-	filler := a.thinkingFillers[a.fillerIdx%len(a.thinkingFillers)]
-	a.fillerIdx++
-	a.prewarmMu.Unlock()
-
-	if len(filler) > 0 {
-		a.log.Info("playing continuous natural thinking filler", "samples", len(filler))
-		a.streamAudioToCall(filler)
-	}
-}
-
-func cleanDuplicateFiller(text string) string {
-	fillers := []string{
-		"හ්ම්...", "හ්ම්..", "හ්ම්,", "හ්ම් ", "හ්ම්",
-		"ආ හරි,", "ආ හරි...", "ආ...", "ආ..", "ආ,",
-		"හරි,", "හරි...", "ඔව්,", "ඔව්...",
-	}
-	trimmed := strings.TrimSpace(text)
-	for _, f := range fillers {
-		if strings.HasPrefix(trimmed, f) {
-			trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, f))
-			trimmed = strings.TrimPrefix(trimmed, ",")
-			trimmed = strings.TrimSpace(trimmed)
-		}
-	}
-	if trimmed == "" {
-		return text
-	}
-	return trimmed
 }
 
 func (a *AIAgent) SetCustomGreeting(text string) {
@@ -287,8 +176,6 @@ func (a *AIAgent) PrewarmGreeting() {
 	}
 	a.prewarmMu.Unlock()
 
-	go a.prewarmThinkingFillers()
-
 	go func() {
 		pcm, err := a.tts.Synthesize(a.ctx, greeting)
 		if err != nil || len(pcm) == 0 {
@@ -307,8 +194,8 @@ func (a *AIAgent) GreetCaller() {
 		return
 	}
 	go func() {
-		// Short safety margin to let WhatsApp media path fully establish
-		time.Sleep(150 * time.Millisecond)
+		// Margin to let WhatsApp media path fully establish before sending audio
+		time.Sleep(750 * time.Millisecond)
 		if !a.enabled.Load() || a.isSpeaking.Load() {
 			return
 		}
@@ -346,6 +233,9 @@ func (a *AIAgent) GreetCaller() {
 }
 
 func (a *AIAgent) streamAudioToCall(pcm []float32) {
+	a.streamMu.Lock()
+	defer a.streamMu.Unlock()
+
 	a.isSpeaking.Store(true)
 	defer func() {
 		// Cooldown period after speech ends to prevent speaker echo triggering VAD
@@ -359,7 +249,7 @@ func (a *AIAgent) streamAudioToCall(pcm []float32) {
 	defer ticker.Stop()
 
 	for offset := 0; offset < len(pcm); offset += chunkSize {
-		if !a.enabled.Load() {
+		if !a.enabled.Load() || a.ctx.Err() != nil {
 			break
 		}
 		end := min(offset+chunkSize, len(pcm))
