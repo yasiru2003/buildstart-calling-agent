@@ -36,8 +36,6 @@ type GeminiLiveAgent struct {
 	greetingTriggered atomic.Bool
 	greetingPending   atomic.Bool
 	callActive        atomic.Bool
-	interruptedThisTurn atomic.Bool
-	isModelSpeaking     atomic.Bool
 	wsMu              sync.Mutex
 	resampleMu        sync.Mutex
 	resampler         *media.Resampler24kTo16k
@@ -290,8 +288,6 @@ func (g *GeminiLiveAgent) readLoop() {
 		// Handle user barge-in / interruption from serverContent
 		if sc.Interrupted {
 			g.log.Info("Gemini detected caller interruption (barge-in)")
-			g.interruptedThisTurn.Store(true)
-			g.isModelSpeaking.Store(false)
 			if g.OnInterrupt != nil {
 				g.OnInterrupt()
 			}
@@ -327,10 +323,6 @@ func (g *GeminiLiveAgent) readLoop() {
 
 		// Stream 24 kHz audio chunks — audio may arrive in sc.Parts OR sc.ModelTurn.Parts
 		processAudioPart := func(data string) {
-			if g.interruptedThisTurn.Load() {
-				return // Discard audio chunks from interrupted turn
-			}
-			g.isModelSpeaking.Store(true)
 
 			g.latMu.Lock()
 			if !g.loggedLatencyThisTurn && !g.lastCallerAudioAt.IsZero() {
@@ -388,8 +380,6 @@ func (g *GeminiLiveAgent) readLoop() {
 		}
 
 		if sc.TurnComplete {
-			g.isModelSpeaking.Store(false)
-			g.interruptedThisTurn.Store(false)
 			g.latMu.Lock()
 			g.loggedLatencyThisTurn = false
 			g.latMu.Unlock()
