@@ -455,8 +455,11 @@ func (g *GeminiLiveAgent) writeAudioLoop() {
 				continue
 			}
 			// WhatsApp sends ~60ms packets during speech.
-			// Only inject DTX silence if no audio has arrived for at least 75ms.
-			if !lastAudioReceivedAt.IsZero() && time.Since(lastAudioReceivedAt) < 75*time.Millisecond {
+			// Only inject DTX silence if:
+			//   1. We've received at least one real frame (lastAudioReceivedAt not zero)
+			//   2. AND no audio has arrived for at least 75ms (caller is in DTX)
+			// This prevents corrupting the caller's very first utterance with silence.
+			if lastAudioReceivedAt.IsZero() || time.Since(lastAudioReceivedAt) < 75*time.Millisecond {
 				continue
 			}
 			// DTX silence mode: advance Gemini's audio clock in real time
